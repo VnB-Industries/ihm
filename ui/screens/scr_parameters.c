@@ -1,0 +1,436 @@
+#include "scr_parameters.h"
+#include "screen_manager.h"
+#include "game_db.h"
+#include <string.h>
+
+/* ── constants ──────────────────────────────────────────────────────────── */
+
+static const char k_correct_pin[] = "2106";
+
+/* ── static objects ─────────────────────────────────────────────────────── */
+
+static lv_obj_t *s_screen;
+
+/* PIN phase */
+static lv_obj_t *s_pin_panel;
+static lv_obj_t *s_pin_display;   /* shows ---- / **** / FAUX */
+
+/* Config phase */
+static lv_obj_t *s_cfg_panel;
+static lv_obj_t *s_sld_trigger;
+static lv_obj_t *s_sld_bonus;
+static lv_obj_t *s_sld_nothing;
+static lv_obj_t *s_sld_malus;
+static lv_obj_t *s_lbl_trigger;
+static lv_obj_t *s_lbl_bonus_w;
+static lv_obj_t *s_lbl_nothing_w;
+static lv_obj_t *s_lbl_malus_w;
+static lv_obj_t *s_user_list;
+static lv_obj_t *s_new_user_ta;
+static lv_obj_t *s_kb;
+
+/* PIN state */
+static char s_pin_buf[5] = {'\0'};
+static int  s_pin_len    = 0;
+
+/* ── PIN helpers ────────────────────────────────────────────────────────── */
+
+static void update_pin_display(void)
+{
+    char buf[5];
+    for (int i = 0; i < 4; i++)
+        buf[i] = (i < s_pin_len) ? '*' : '-';
+    buf[4] = '\0';
+    lv_label_set_text(s_pin_display, buf);
+    lv_obj_set_style_text_color(s_pin_display, lv_color_hex(0xF5C518), LV_PART_MAIN);
+}
+
+/* ── user list (inside config panel) ───────────────────────────────────── */
+
+static void on_delete_user(lv_event_t *e);  /* forward decl */
+
+static void refresh_user_list(void)
+{
+    lv_obj_clean(s_user_list);
+
+    user_record_t users[GAME_DB_MAX_USERS];
+    int count = db_get_all_users(users, GAME_DB_MAX_USERS);
+
+    for (int i = 0; i < count; i++) {
+        /* Row container */
+        lv_obj_t *row = lv_obj_create(s_user_list);
+        lv_obj_set_size(row, 680, 48);
+        lv_obj_set_style_bg_color(row, lv_color_hex(0x0F3460), LV_PART_MAIN);
+        lv_obj_set_style_border_width(row, 0, LV_PART_MAIN);
+        lv_obj_set_style_radius(row, 6, LV_PART_MAIN);
+        lv_obj_set_style_pad_hor(row, 10, LV_PART_MAIN);
+        lv_obj_set_style_pad_ver(row, 0, LV_PART_MAIN);
+        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN,
+                              LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+
+        /* Name label */
+        lv_obj_t *lbl = lv_label_create(row);
+        lv_label_set_text(lbl, users[i].name);
+        lv_obj_set_style_text_color(lbl, lv_color_hex(0xEAEAEA), LV_PART_MAIN);
+        lv_obj_set_width(lbl, 560);
+
+        /* Delete button */
+        lv_obj_t *del = lv_btn_create(row);
+        lv_obj_set_size(del, 60, 36);
+        lv_obj_set_style_bg_color(del, lv_color_hex(0xD50000), LV_PART_MAIN);
+        lv_obj_add_event_cb(del, on_delete_user, LV_EVENT_CLICKED,
+                            (void *)(intptr_t)users[i].id);
+        lv_obj_t *del_lbl = lv_label_create(del);
+        lv_label_set_text(del_lbl, LV_SYMBOL_CLOSE);
+        lv_obj_center(del_lbl);
+    }
+}
+
+/* ── config-phase helpers ───────────────────────────────────────────────── */
+
+static void update_slider_labels(void)
+{
+    char buf[8];
+    lv_snprintf(buf, sizeof(buf), "%d %%",
+                lv_slider_get_value(s_sld_trigger));
+    lv_label_set_text(s_lbl_trigger, buf);
+
+    lv_snprintf(buf, sizeof(buf), "%d",
+                lv_slider_get_value(s_sld_bonus));
+    lv_label_set_text(s_lbl_bonus_w, buf);
+
+    lv_snprintf(buf, sizeof(buf), "%d",
+                lv_slider_get_value(s_sld_nothing));
+    lv_label_set_text(s_lbl_nothing_w, buf);
+
+    lv_snprintf(buf, sizeof(buf), "%d",
+                lv_slider_get_value(s_sld_malus));
+    lv_label_set_text(s_lbl_malus_w, buf);
+}
+
+static void show_config_phase(void)
+{
+    /* Load current values */
+    lv_slider_set_value(s_sld_trigger,
+        db_get_config("wheel_trigger_chance", 20), LV_ANIM_OFF);
+    lv_slider_set_value(s_sld_bonus,
+        db_get_config("bonus_wheel_bonus_weight", 1), LV_ANIM_OFF);
+    lv_slider_set_value(s_sld_nothing,
+        db_get_config("bonus_wheel_nothing_weight", 2), LV_ANIM_OFF);
+    lv_slider_set_value(s_sld_malus,
+        db_get_config("bonus_wheel_malus_weight", 1), LV_ANIM_OFF);
+    update_slider_labels();
+
+    refresh_user_list();
+
+    lv_obj_add_flag(s_pin_panel, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(s_cfg_panel, LV_OBJ_FLAG_HIDDEN);
+}
+
+/* ── event callbacks ────────────────────────────────────────────────────── */
+
+/* numpad map for PIN entry */
+static const char * const k_numpad_map[] = {
+    "1", "2", "3", "\n",
+    "4", "5", "6", "\n",
+    "7", "8", "9", "\n",
+    "DEL", "0", LV_SYMBOL_OK, ""
+};
+
+static void on_numpad_clicked(lv_event_t *e)
+{
+    lv_obj_t *btnm = lv_event_get_target(e);
+    uint32_t  id   = lv_btnmatrix_get_selected_btn(btnm);
+    const char *txt = lv_btnmatrix_get_btn_text(btnm, id);
+    if (!txt) return;
+
+    if (strcmp(txt, "DEL") == 0) {
+        if (s_pin_len > 0) {
+            s_pin_len--;
+            s_pin_buf[s_pin_len] = '\0';
+        }
+        update_pin_display();
+    } else if (strcmp(txt, LV_SYMBOL_OK) == 0) {
+        if (strcmp(s_pin_buf, k_correct_pin) == 0) {
+            show_config_phase();
+        } else {
+            lv_label_set_text(s_pin_display, "FAUX");
+            lv_obj_set_style_text_color(s_pin_display,
+                lv_color_hex(0xE94560), LV_PART_MAIN);
+            s_pin_len = 0;
+            memset(s_pin_buf, 0, sizeof(s_pin_buf));
+        }
+    } else if (txt[0] >= '0' && txt[0] <= '9' && s_pin_len < 4) {
+        s_pin_buf[s_pin_len++] = txt[0];
+        s_pin_buf[s_pin_len]   = '\0';
+        update_pin_display();
+    }
+}
+
+static void on_slider_changed(lv_event_t *e)
+{
+    (void)e;
+    update_slider_labels();
+}
+
+static void on_save_clicked(lv_event_t *e)
+{
+    (void)e;
+    db_set_config("wheel_trigger_chance",
+                  lv_slider_get_value(s_sld_trigger));
+    db_set_config("bonus_wheel_bonus_weight",
+                  lv_slider_get_value(s_sld_bonus));
+    db_set_config("bonus_wheel_nothing_weight",
+                  lv_slider_get_value(s_sld_nothing));
+    db_set_config("bonus_wheel_malus_weight",
+                  lv_slider_get_value(s_sld_malus));
+}
+
+static void on_back_clicked(lv_event_t *e)
+{
+    (void)e;
+    /* Hide keyboard if visible */
+    if (!lv_obj_has_flag(s_kb, LV_OBJ_FLAG_HIDDEN))
+        lv_obj_add_flag(s_kb, LV_OBJ_FLAG_HIDDEN);
+    screen_manager_load(SCREEN_HOME);
+}
+
+static void on_add_user_clicked(lv_event_t *e)
+{
+    (void)e;
+    const char *name = lv_textarea_get_text(s_new_user_ta);
+    if (name && name[0] != '\0') {
+        db_add_user(name);
+        lv_textarea_set_text(s_new_user_ta, "");
+        lv_obj_add_flag(s_kb, LV_OBJ_FLAG_HIDDEN);
+        refresh_user_list();
+    }
+}
+
+static void on_delete_user(lv_event_t *e)
+{
+    int uid = (int)(intptr_t)lv_event_get_user_data(e);
+    db_delete_user(uid);
+    refresh_user_list();
+}
+
+static void on_ta_focused(lv_event_t *e)
+{
+    lv_obj_t *ta = lv_event_get_target(e);
+    lv_keyboard_set_textarea(s_kb, ta);
+    lv_obj_clear_flag(s_kb, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(s_kb);
+}
+
+static void on_kb_event(lv_event_t *e)
+{
+    lv_event_code_t code = lv_event_get_code(e);
+    if (code == LV_EVENT_READY || code == LV_EVENT_CANCEL)
+        lv_obj_add_flag(s_kb, LV_OBJ_FLAG_HIDDEN);
+}
+
+/* ── slider row builder ─────────────────────────────────────────────────── */
+
+static lv_obj_t *create_slider_row(lv_obj_t *parent, const char *caption,
+                                    int min_v, int max_v,
+                                    lv_obj_t **sld_out, lv_obj_t **val_lbl_out)
+{
+    lv_obj_t *row = lv_obj_create(parent);
+    lv_obj_set_size(row, 680, 50);
+    lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(row, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(row, 0, LV_PART_MAIN);
+    lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *cap = lv_label_create(row);
+    lv_label_set_text(cap, caption);
+    lv_obj_set_style_text_color(cap, lv_color_hex(0xEAEAEA), LV_PART_MAIN);
+    lv_obj_set_width(cap, 240);
+    lv_obj_align(cap, LV_ALIGN_LEFT_MID, 0, 0);
+
+    lv_obj_t *sld = lv_slider_create(row);
+    lv_obj_set_size(sld, 340, 14);
+    lv_obj_align(sld, LV_ALIGN_LEFT_MID, 250, 0);
+    lv_slider_set_range(sld, min_v, max_v);
+    lv_obj_add_event_cb(sld, on_slider_changed, LV_EVENT_VALUE_CHANGED, NULL);
+
+    lv_obj_t *val = lv_label_create(row);
+    lv_obj_set_style_text_color(val, lv_color_hex(0xF5C518), LV_PART_MAIN);
+    lv_obj_set_width(val, 80);
+    lv_obj_align(val, LV_ALIGN_RIGHT_MID, 0, 0);
+
+    *sld_out     = sld;
+    *val_lbl_out = val;
+    return row;
+}
+
+/* ── public API ─────────────────────────────────────────────────────────── */
+
+void scr_parameters_init(void)
+{
+    s_screen = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(s_screen, lv_color_hex(0x1A1A2E), LV_PART_MAIN);
+
+    /* ━━━━━━━━━━ PIN PANEL ━━━━━━━━━━ */
+    s_pin_panel = lv_obj_create(s_screen);
+    lv_obj_set_size(s_pin_panel, 800, 480);
+    lv_obj_align(s_pin_panel, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_bg_color(s_pin_panel, lv_color_hex(0x1A1A2E), LV_PART_MAIN);
+    lv_obj_set_style_border_width(s_pin_panel, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(s_pin_panel, 0, LV_PART_MAIN);
+    lv_obj_clear_flag(s_pin_panel, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *pin_title = lv_label_create(s_pin_panel);
+    lv_label_set_text(pin_title, LV_SYMBOL_SETTINGS "  Code PIN");
+    lv_obj_set_style_text_color(pin_title, lv_color_hex(0xF5C518), LV_PART_MAIN);
+    lv_obj_align(pin_title, LV_ALIGN_TOP_MID, 0, 40);
+
+    s_pin_display = lv_label_create(s_pin_panel);
+    lv_label_set_text(s_pin_display, "----");
+    lv_obj_set_style_text_color(s_pin_display, lv_color_hex(0xF5C518), LV_PART_MAIN);
+    lv_obj_align(s_pin_display, LV_ALIGN_TOP_MID, 0, 100);
+
+    lv_obj_t *btnm = lv_btnmatrix_create(s_pin_panel);
+    lv_btnmatrix_set_map(btnm, k_numpad_map);
+    lv_obj_set_size(btnm, 300, 260);
+    lv_obj_align(btnm, LV_ALIGN_CENTER, 0, 40);
+    lv_obj_add_event_cb(btnm, on_numpad_clicked, LV_EVENT_CLICKED, NULL);
+
+    /* ━━━━━━━━━━ CONFIG PANEL ━━━━━━━━━━ */
+    s_cfg_panel = lv_obj_create(s_screen);
+    lv_obj_set_size(s_cfg_panel, 800, 480);
+    lv_obj_align(s_cfg_panel, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_bg_color(s_cfg_panel, lv_color_hex(0x1A1A2E), LV_PART_MAIN);
+    lv_obj_set_style_border_width(s_cfg_panel, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(s_cfg_panel, 0, LV_PART_MAIN);
+    lv_obj_add_flag(s_cfg_panel, LV_OBJ_FLAG_HIDDEN);
+
+    lv_obj_t *cfg_title = lv_label_create(s_cfg_panel);
+    lv_label_set_text(cfg_title, LV_SYMBOL_SETTINGS "  Paramètres");
+    lv_obj_set_style_text_color(cfg_title, lv_color_hex(0xF5C518), LV_PART_MAIN);
+    lv_obj_align(cfg_title, LV_ALIGN_TOP_MID, 0, 14);
+
+    /* Scrollable content area */
+    lv_obj_t *scroll = lv_obj_create(s_cfg_panel);
+    lv_obj_set_size(scroll, 760, 390);
+    lv_obj_align(scroll, LV_ALIGN_TOP_MID, 0, 52);
+    lv_obj_set_style_bg_color(scroll, lv_color_hex(0x16213E), LV_PART_MAIN);
+    lv_obj_set_style_border_width(scroll, 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(scroll, 10, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(scroll, 14, LV_PART_MAIN);
+    lv_obj_set_style_pad_gap(scroll, 8, LV_PART_MAIN);
+    lv_obj_set_flex_flow(scroll, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_scroll_dir(scroll, LV_DIR_VER);
+
+    /* Section: Chances */
+    lv_obj_t *sec1 = lv_label_create(scroll);
+    lv_label_set_text(sec1, "Chances");
+    lv_obj_set_style_text_color(sec1, lv_color_hex(0x888888), LV_PART_MAIN);
+
+    create_slider_row(scroll, "Chance roue bonus", 0, 100,
+                      &s_sld_trigger, &s_lbl_trigger);
+
+    /* Section: Poids roue bonus */
+    lv_obj_t *sec2 = lv_label_create(scroll);
+    lv_label_set_text(sec2, "Poids roue bonus");
+    lv_obj_set_style_text_color(sec2, lv_color_hex(0x888888), LV_PART_MAIN);
+
+    create_slider_row(scroll, "Poids BONUS",  0, 5, &s_sld_bonus,   &s_lbl_bonus_w);
+    create_slider_row(scroll, "Poids RIEN",   0, 5, &s_sld_nothing, &s_lbl_nothing_w);
+    create_slider_row(scroll, "Poids MALUS",  0, 5, &s_sld_malus,   &s_lbl_malus_w);
+
+    /* Section: Joueurs */
+    lv_obj_t *sec3 = lv_label_create(scroll);
+    lv_label_set_text(sec3, "Joueurs");
+    lv_obj_set_style_text_color(sec3, lv_color_hex(0x888888), LV_PART_MAIN);
+
+    /* Add-user row */
+    lv_obj_t *add_row = lv_obj_create(scroll);
+    lv_obj_set_size(add_row, 680, 54);
+    lv_obj_set_style_bg_opa(add_row, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(add_row, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(add_row, 0, LV_PART_MAIN);
+    lv_obj_clear_flag(add_row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(add_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(add_row, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_gap(add_row, 10, LV_PART_MAIN);
+
+    s_new_user_ta = lv_textarea_create(add_row);
+    lv_obj_set_size(s_new_user_ta, 440, 46);
+    lv_textarea_set_one_line(s_new_user_ta, true);
+    lv_textarea_set_placeholder_text(s_new_user_ta, "Nom du joueur...");
+    lv_obj_add_event_cb(s_new_user_ta, on_ta_focused,
+                        LV_EVENT_FOCUSED, NULL);
+
+    lv_obj_t *btn_add = lv_btn_create(add_row);
+    lv_obj_set_size(btn_add, 200, 46);
+    lv_obj_set_style_bg_color(btn_add, lv_color_hex(0x00C853), LV_PART_MAIN);
+    lv_obj_add_event_cb(btn_add, on_add_user_clicked, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *lbl_add = lv_label_create(btn_add);
+    lv_label_set_text(lbl_add, LV_SYMBOL_PLUS "  Ajouter");
+    lv_obj_center(lbl_add);
+
+    /* User list container */
+    s_user_list = lv_obj_create(scroll);
+    lv_obj_set_size(s_user_list, 680, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(s_user_list, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(s_user_list, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(s_user_list, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_gap(s_user_list, 6, LV_PART_MAIN);
+    lv_obj_set_flex_flow(s_user_list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_clear_flag(s_user_list, LV_OBJ_FLAG_SCROLLABLE);
+
+    /* Bottom buttons row */
+    lv_obj_t *btn_row = lv_obj_create(s_cfg_panel);
+    lv_obj_set_size(btn_row, 760, 44);
+    lv_obj_align(btn_row, LV_ALIGN_BOTTOM_MID, 0, -6);
+    lv_obj_set_style_bg_opa(btn_row, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(btn_row, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(btn_row, 0, LV_PART_MAIN);
+    lv_obj_set_flex_flow(btn_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(btn_row, LV_FLEX_ALIGN_SPACE_BETWEEN,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_clear_flag(btn_row, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *btn_back = lv_btn_create(btn_row);
+    lv_obj_set_size(btn_back, 160, 42);
+    lv_obj_set_style_bg_color(btn_back, lv_color_hex(0x444444), LV_PART_MAIN);
+    lv_obj_add_event_cb(btn_back, on_back_clicked, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *lbl_back = lv_label_create(btn_back);
+    lv_label_set_text(lbl_back, LV_SYMBOL_LEFT "  Retour");
+    lv_obj_center(lbl_back);
+
+    lv_obj_t *btn_save = lv_btn_create(btn_row);
+    lv_obj_set_size(btn_save, 160, 42);
+    lv_obj_set_style_bg_color(btn_save, lv_color_hex(0x0F3460), LV_PART_MAIN);
+    lv_obj_add_event_cb(btn_save, on_save_clicked, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *lbl_save = lv_label_create(btn_save);
+    lv_label_set_text(lbl_save, LV_SYMBOL_SAVE "  Sauvegarder");
+    lv_obj_center(lbl_save);
+
+    /* Keyboard — overlay at bottom, hidden by default */
+    s_kb = lv_keyboard_create(s_screen);
+    lv_obj_set_size(s_kb, 800, 220);
+    lv_obj_align(s_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_keyboard_set_mode(s_kb, LV_KEYBOARD_MODE_TEXT_LOWER);
+    lv_obj_add_flag(s_kb, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_event_cb(s_kb, on_kb_event, LV_EVENT_READY,  NULL);
+    lv_obj_add_event_cb(s_kb, on_kb_event, LV_EVENT_CANCEL, NULL);
+}
+
+lv_obj_t *scr_parameters_get(void) { return s_screen; }
+
+void scr_parameters_refresh(void)
+{
+    /* Always reset to PIN phase on entry */
+    s_pin_len = 0;
+    memset(s_pin_buf, 0, sizeof(s_pin_buf));
+    update_pin_display();
+
+    lv_obj_add_flag(s_kb,        LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_cfg_panel, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(s_pin_panel, LV_OBJ_FLAG_HIDDEN);
+}

@@ -1,44 +1,48 @@
-# Generated file, do not edit.
-# This file is used to compile the UI Project created by the Editor.
-# See `user_config.cmake` as a way to add your own source files here
+cmake_minimum_required(VERSION 3.15)
 
-# Only set project if this is the top-level CMakeLists.txt
-if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
-  cmake_minimum_required(VERSION 3.10)
-  # can be customized
-  project(LVGLProject)
-  set(IS_TOP_LEVEL TRUE)
-else()
-  set(IS_TOP_LEVEL FALSE)
+project(ihm LANGUAGES C CXX)
+
+file(GLOB_RECURSE SOURCES
+    src/*.c       src/*.cpp
+    screens/*.c   screens/*.cpp
+    widgets/*.c   widgets/*.cpp
+    components/*.c components/*.cpp
+)
+
+include_directories(src)
+include_directories(components)
+include_directories(fonts)
+include_directories(images)
+include_directories(screens)
+include_directories(widgets)
+
+add_executable(${PROJECT_NAME} ${SOURCES})
+
+if(STRIP_BINARY)
+add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_STRIP} --strip-all $<TARGET_FILE:${PROJECT_NAME}>
+    COMMENT "Stripping binary (all symbols)"
+)
 endif()
 
-# Handles giving component libraries unique names when included as subprojects.
-if(DEFINED LVGL_COMPONENT_LIB_NAME)
-  set(LIB_NAME ${LVGL_COMPONENT_LIB_NAME})
-else()
-  set(LIB_NAME lib-ui)
-endif()
+add_definitions(-DLV_CONF_INCLUDE_SIMPLE)
 
-# This includes the generated list of .c files
-include(${CMAKE_CURRENT_LIST_DIR}/file_list_gen.cmake)
-# Include any component libraries
-include(${CMAKE_CURRENT_LIST_DIR}/component_lib_list_gen.cmake)
-# Include extra source files that the user added
-include(${CMAKE_CURRENT_LIST_DIR}/user_config.cmake)
+include(FindPkgConfig)
+pkg_check_modules(LVDRIVERS REQUIRED lv_drivers)
+pkg_check_modules(LVGL REQUIRED lvgl)
+pkg_check_modules(SQLITE3 REQUIRED sqlite3)
 
-# Create the UI sources as a library
-add_library(${LIB_NAME} ${LV_EDITOR_PROJECT_SOURCES})
+target_include_directories(${PROJECT_NAME} SYSTEM PUBLIC ${LVDRIVERS_INCLUDE_DIRS})
+target_link_libraries(${PROJECT_NAME} ${LVDRIVERS_LIBRARIES})
 
-if(DEFINED LV_EDITOR_COMPONENT_LIB_LIST)
-  target_link_libraries(${LIB_NAME} PUBLIC ${LV_EDITOR_COMPONENT_LIB_LIST})
-endif()
+target_include_directories(${PROJECT_NAME} SYSTEM PUBLIC ${LVGL_INCLUDE_DIRS})
+target_link_libraries(${PROJECT_NAME} ${LVGL_LIBRARIES})
 
-if(TARGET lvgl)
-  target_link_libraries(${LIB_NAME} PUBLIC lvgl)
-endif()
+target_include_directories(${PROJECT_NAME} SYSTEM PUBLIC ${SQLITE3_INCLUDE_DIRS})
+target_link_libraries(${PROJECT_NAME} ${SQLITE3_LIBRARIES})
 
-# Add the project folder as include folder
-target_include_directories(${LIB_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME ihm.app)
 
-# Set include directories for the project This will include the LVGL includes
-target_include_directories(${LIB_NAME} PRIVATE ${COMMON_INCLUDE_DIRS})
+install(TARGETS ${PROJECT_NAME}
+    RUNTIME DESTINATION /root/easy/
+)
