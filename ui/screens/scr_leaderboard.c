@@ -1,6 +1,7 @@
 #include "scr_leaderboard.h"
 #include "screen_manager.h"
 #include "game_db.h"
+#include "game_logic.h"
 
 static lv_obj_t *s_screen;
 static lv_obj_t *s_table;
@@ -46,7 +47,7 @@ void scr_leaderboard_init(void)
     lv_table_set_cell_value(s_table, 0, 1, "Total cL");
     lv_table_set_cell_value(s_table, 0, 2, "Bonus");
     lv_table_set_cell_value(s_table, 0, 3, "Malus");
-    lv_table_set_cell_value(s_table, 0, 4, "A donné à");
+    lv_table_set_cell_value(s_table, 0, 4, "A donne a");
 
     /* Back button */
     lv_obj_t *btn_back = lv_btn_create(s_screen);
@@ -98,9 +99,27 @@ void scr_leaderboard_refresh(void)
         if (users[i].given_modifier != 0 && users[i].given_to_id > 0) {
             user_record_t target;
             if (db_get_user(users[i].given_to_id, &target) == 0) {
-                lv_snprintf(given, sizeof(given), "%s à %s",
-                    users[i].given_modifier > 0 ? "Bonus" : "Malus",
-                    target.name);
+                int mins = db_get_config("timeout_modifier_minutes", 5);
+                const char *type_str;
+                switch ((modifier_type_t)users[i].given_modifier) {
+                    case MODIFIER_BONUS:          type_str = "Bonus";        break;
+                    case MODIFIER_MALUS:          type_str = "Malus";        break;
+                    case MODIFIER_TIMEOUT_ADD: {
+                        static char tmbuf[12];
+                        lv_snprintf(tmbuf, sizeof(tmbuf), "+%dmin", mins);
+                        type_str = tmbuf;
+                        break;
+                    }
+                    case MODIFIER_TIMEOUT_REMOVE: {
+                        static char tmbuf[12];
+                        lv_snprintf(tmbuf, sizeof(tmbuf), "-%dmin", mins);
+                        type_str = tmbuf;
+                        break;
+                    }
+                    default: type_str = "?"; break;
+                }
+                lv_snprintf(given, sizeof(given), "%s a %s",
+                    type_str, target.name);
             }
         }
         lv_table_set_cell_value(s_table, row, 4, given);

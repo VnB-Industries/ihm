@@ -77,7 +77,7 @@ void scr_home_init(void)
                   lv_color_hex(0xE94560), on_start_clicked);
     make_main_btn(col, LV_SYMBOL_LIST "  Classement",
                   lv_color_hex(0x0F3460), on_leaderboard_clicked);
-    make_main_btn(col, LV_SYMBOL_SETTINGS "  Paramètres",
+    make_main_btn(col, LV_SYMBOL_SETTINGS "  Parametres",
                   lv_color_hex(0x444444), on_parameters_clicked);
 }
 

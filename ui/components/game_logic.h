@@ -13,15 +13,19 @@ extern "C" {
 /* ── modifier types ─────────────────────────────────────────────────────── */
 
 typedef enum {
-    MODIFIER_NONE  =  0,
-    MODIFIER_BONUS =  1,
-    MODIFIER_MALUS = -1
+    MODIFIER_NONE           =  0,
+    MODIFIER_BONUS          =  1,
+    MODIFIER_MALUS          = -1,
+    MODIFIER_TIMEOUT_ADD    =  2,   /* add time to target's spin cooldown (malus) */
+    MODIFIER_TIMEOUT_REMOVE = -2    /* remove time from target's spin cooldown (bonus) */
 } modifier_type_t;
 
 /* Token values stored in bonus-wheel segments */
-#define BONUS_WHEEL_VAL_NOTHING  0u
-#define BONUS_WHEEL_VAL_BONUS    1u
-#define BONUS_WHEEL_VAL_MALUS    2u
+#define BONUS_WHEEL_VAL_NOTHING         0u
+#define BONUS_WHEEL_VAL_BONUS           1u
+#define BONUS_WHEEL_VAL_MALUS           2u
+#define BONUS_WHEEL_VAL_TIMEOUT_ADD     3u
+#define BONUS_WHEEL_VAL_TIMEOUT_REMOVE  4u
 
 /* ── wheel segment builders ─────────────────────────────────────────────── */
 

@@ -21,10 +21,22 @@ static lv_obj_t *s_sld_trigger;
 static lv_obj_t *s_sld_bonus;
 static lv_obj_t *s_sld_nothing;
 static lv_obj_t *s_sld_malus;
+static lv_obj_t *s_sld_timeout_add_w;
+static lv_obj_t *s_sld_timeout_rem_w;
+static lv_obj_t *s_sld_timeout_mins;
+static lv_obj_t *s_sld_max_bonus;
+static lv_obj_t *s_sld_max_malus;
+static lv_obj_t *s_sld_cooldown;
 static lv_obj_t *s_lbl_trigger;
 static lv_obj_t *s_lbl_bonus_w;
 static lv_obj_t *s_lbl_nothing_w;
 static lv_obj_t *s_lbl_malus_w;
+static lv_obj_t *s_lbl_timeout_add_w;
+static lv_obj_t *s_lbl_timeout_rem_w;
+static lv_obj_t *s_lbl_timeout_mins;
+static lv_obj_t *s_lbl_max_bonus;
+static lv_obj_t *s_lbl_max_malus;
+static lv_obj_t *s_lbl_cooldown;
 static lv_obj_t *s_user_list;
 static lv_obj_t *s_new_user_ta;
 static lv_obj_t *s_kb;
@@ -92,7 +104,7 @@ static void refresh_user_list(void)
 
 static void update_slider_labels(void)
 {
-    char buf[8];
+    char buf[12];
     lv_snprintf(buf, sizeof(buf), "%d %%",
                 lv_slider_get_value(s_sld_trigger));
     lv_label_set_text(s_lbl_trigger, buf);
@@ -108,6 +120,30 @@ static void update_slider_labels(void)
     lv_snprintf(buf, sizeof(buf), "%d",
                 lv_slider_get_value(s_sld_malus));
     lv_label_set_text(s_lbl_malus_w, buf);
+
+    lv_snprintf(buf, sizeof(buf), "%d",
+                lv_slider_get_value(s_sld_max_bonus));
+    lv_label_set_text(s_lbl_max_bonus, buf);
+
+    lv_snprintf(buf, sizeof(buf), "%d",
+                lv_slider_get_value(s_sld_max_malus));
+    lv_label_set_text(s_lbl_max_malus, buf);
+
+    lv_snprintf(buf, sizeof(buf), "%d s",
+                lv_slider_get_value(s_sld_cooldown));
+    lv_label_set_text(s_lbl_cooldown, buf);
+
+    lv_snprintf(buf, sizeof(buf), "%d",
+                lv_slider_get_value(s_sld_timeout_add_w));
+    lv_label_set_text(s_lbl_timeout_add_w, buf);
+
+    lv_snprintf(buf, sizeof(buf), "%d",
+                lv_slider_get_value(s_sld_timeout_rem_w));
+    lv_label_set_text(s_lbl_timeout_rem_w, buf);
+
+    lv_snprintf(buf, sizeof(buf), "%d min",
+                lv_slider_get_value(s_sld_timeout_mins));
+    lv_label_set_text(s_lbl_timeout_mins, buf);
 }
 
 static void show_config_phase(void)
@@ -121,6 +157,18 @@ static void show_config_phase(void)
         db_get_config("bonus_wheel_nothing_weight", 2), LV_ANIM_OFF);
     lv_slider_set_value(s_sld_malus,
         db_get_config("bonus_wheel_malus_weight", 1), LV_ANIM_OFF);
+    lv_slider_set_value(s_sld_max_bonus,
+        db_get_config("max_bonus_stack", 5), LV_ANIM_OFF);
+    lv_slider_set_value(s_sld_max_malus,
+        db_get_config("max_malus_stack", 5), LV_ANIM_OFF);
+    lv_slider_set_value(s_sld_cooldown,
+        db_get_config("spin_cooldown_seconds", 0), LV_ANIM_OFF);
+    lv_slider_set_value(s_sld_timeout_add_w,
+        db_get_config("bonus_wheel_timeout_add_weight", 1), LV_ANIM_OFF);
+    lv_slider_set_value(s_sld_timeout_rem_w,
+        db_get_config("bonus_wheel_timeout_remove_weight", 1), LV_ANIM_OFF);
+    lv_slider_set_value(s_sld_timeout_mins,
+        db_get_config("timeout_modifier_minutes", 5), LV_ANIM_OFF);
     update_slider_labels();
 
     refresh_user_list();
@@ -186,6 +234,18 @@ static void on_save_clicked(lv_event_t *e)
                   lv_slider_get_value(s_sld_nothing));
     db_set_config("bonus_wheel_malus_weight",
                   lv_slider_get_value(s_sld_malus));
+    db_set_config("max_bonus_stack",
+                  lv_slider_get_value(s_sld_max_bonus));
+    db_set_config("max_malus_stack",
+                  lv_slider_get_value(s_sld_max_malus));
+    db_set_config("spin_cooldown_seconds",
+                  lv_slider_get_value(s_sld_cooldown));
+    db_set_config("bonus_wheel_timeout_add_weight",
+                  lv_slider_get_value(s_sld_timeout_add_w));
+    db_set_config("bonus_wheel_timeout_remove_weight",
+                  lv_slider_get_value(s_sld_timeout_rem_w));
+    db_set_config("timeout_modifier_minutes",
+                  lv_slider_get_value(s_sld_timeout_mins));
 }
 
 static void on_back_clicked(lv_event_t *e)
@@ -298,6 +358,16 @@ void scr_parameters_init(void)
     lv_obj_align(btnm, LV_ALIGN_CENTER, 0, 40);
     lv_obj_add_event_cb(btnm, on_numpad_clicked, LV_EVENT_CLICKED, NULL);
 
+    /* Back button on PIN screen */
+    lv_obj_t *btn_pin_back = lv_btn_create(s_pin_panel);
+    lv_obj_set_size(btn_pin_back, 160, 46);
+    lv_obj_align(btn_pin_back, LV_ALIGN_BOTTOM_RIGHT, -20, -14);
+    lv_obj_set_style_bg_color(btn_pin_back, lv_color_hex(0x444444), LV_PART_MAIN);
+    lv_obj_add_event_cb(btn_pin_back, on_back_clicked, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *lbl_pin_back = lv_label_create(btn_pin_back);
+    lv_label_set_text(lbl_pin_back, LV_SYMBOL_LEFT "  Retour");
+    lv_obj_center(lbl_pin_back);
+
     /* ━━━━━━━━━━ CONFIG PANEL ━━━━━━━━━━ */
     s_cfg_panel = lv_obj_create(s_screen);
     lv_obj_set_size(s_cfg_panel, 800, 480);
@@ -308,7 +378,7 @@ void scr_parameters_init(void)
     lv_obj_add_flag(s_cfg_panel, LV_OBJ_FLAG_HIDDEN);
 
     lv_obj_t *cfg_title = lv_label_create(s_cfg_panel);
-    lv_label_set_text(cfg_title, LV_SYMBOL_SETTINGS "  Paramètres");
+    lv_label_set_text(cfg_title, LV_SYMBOL_SETTINGS "  Parametres");
     lv_obj_set_style_text_color(cfg_title, lv_color_hex(0xF5C518), LV_PART_MAIN);
     lv_obj_align(cfg_title, LV_ALIGN_TOP_MID, 0, 14);
 
@@ -340,6 +410,28 @@ void scr_parameters_init(void)
     create_slider_row(scroll, "Poids BONUS",  0, 5, &s_sld_bonus,   &s_lbl_bonus_w);
     create_slider_row(scroll, "Poids RIEN",   0, 5, &s_sld_nothing, &s_lbl_nothing_w);
     create_slider_row(scroll, "Poids MALUS",  0, 5, &s_sld_malus,   &s_lbl_malus_w);
+    create_slider_row(scroll, "Poids +TEMPS", 0, 5, &s_sld_timeout_add_w, &s_lbl_timeout_add_w);
+    create_slider_row(scroll, "Poids -TEMPS", 0, 5, &s_sld_timeout_rem_w, &s_lbl_timeout_rem_w);
+
+    /* Section: Timeout */
+    lv_obj_t *sec_to = lv_label_create(scroll);
+    lv_label_set_text(sec_to, "Timeout");
+    lv_obj_set_style_text_color(sec_to, lv_color_hex(0x888888), LV_PART_MAIN);
+
+    create_slider_row(scroll, "Duree timeout (min)", 1, 60,
+                      &s_sld_timeout_mins, &s_lbl_timeout_mins);
+
+    /* Section: Limites */
+    lv_obj_t *sec_lim = lv_label_create(scroll);
+    lv_label_set_text(sec_lim, "Limites");
+    lv_obj_set_style_text_color(sec_lim, lv_color_hex(0x888888), LV_PART_MAIN);
+
+    create_slider_row(scroll, "Max bonus par joueur", 1, 20,
+                      &s_sld_max_bonus, &s_lbl_max_bonus);
+    create_slider_row(scroll, "Max malus par joueur", 1, 20,
+                      &s_sld_max_malus, &s_lbl_max_malus);
+    create_slider_row(scroll, "Cooldown entre tours (s)", 0, 300,
+                      &s_sld_cooldown, &s_lbl_cooldown);
 
     /* Section: Joueurs */
     lv_obj_t *sec3 = lv_label_create(scroll);

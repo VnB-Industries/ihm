@@ -58,18 +58,42 @@ void scr_give_modifier_refresh(void)
     modifier_type_t mod = game_get_pending_modifier();
     int active_id = game_get_active_user();
 
-    /* Title */
-    if (mod == MODIFIER_BONUS)
-        lv_label_set_text(s_title_label,
-            LV_SYMBOL_OK "  BONUS — Qui en profite ?");
-    else
-        lv_label_set_text(s_title_label,
-            LV_SYMBOL_WARNING "  MALUS — Qui l'écope ?");
-
-    /* Button color */
-    lv_color_t col = (mod == MODIFIER_BONUS)
-        ? lv_color_hex(0x1B5E20)   /* dark green */
-        : lv_color_hex(0x7F0000);  /* dark red   */
+    /* Title + button colour depend on modifier type */
+    lv_color_t col;
+    switch (mod) {
+        case MODIFIER_BONUS:
+            lv_label_set_text(s_title_label,
+                LV_SYMBOL_OK "  BONUS - Qui en profite ?");
+            col = lv_color_hex(0x1B5E20); /* dark green */
+            break;
+        case MODIFIER_MALUS:
+            lv_label_set_text(s_title_label,
+                LV_SYMBOL_WARNING "  MALUS - Qui l'ecope ?");
+            col = lv_color_hex(0x7F0000); /* dark red */
+            break;
+        case MODIFIER_TIMEOUT_ADD: {
+            int mins = db_get_config("timeout_modifier_minutes", 5);
+            char tbuf[64];
+            lv_snprintf(tbuf, sizeof(tbuf),
+                LV_SYMBOL_PAUSE "  +%d min - Qui attend ?", mins);
+            lv_label_set_text(s_title_label, tbuf);
+            col = lv_color_hex(0x7F3300); /* dark orange */
+            break;
+        }
+        case MODIFIER_TIMEOUT_REMOVE: {
+            int mins = db_get_config("timeout_modifier_minutes", 5);
+            char tbuf[64];
+            lv_snprintf(tbuf, sizeof(tbuf),
+                LV_SYMBOL_PLAY "  -%d min - Qui en profite ?", mins);
+            lv_label_set_text(s_title_label, tbuf);
+            col = lv_color_hex(0x003D7F); /* dark blue */
+            break;
+        }
+        default:
+            lv_label_set_text(s_title_label, "Choisissez un joueur");
+            col = lv_color_hex(0x444444);
+            break;
+    }
 
     lv_obj_clean(s_list_cont);
 

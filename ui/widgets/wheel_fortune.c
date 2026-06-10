@@ -3,7 +3,7 @@
 
 /* ── configuration ──────────────────────────────────────────────────────── */
 
-#define WF_ARC_STEPS      12   /* polygon vertices per arc – higher = smoother */
+#define WF_ARC_STEPS      8    /* polygon vertices per arc – 8 is smooth enough */
 #define WF_POINTER_H      18   /* pointer triangle height in pixels           */
 
 /* ── private data ───────────────────────────────────────────────────────── */
@@ -196,8 +196,9 @@ lv_obj_t *wheel_fortune_create(lv_obj_t *parent, lv_coord_t radius)
 
     /* Canvas for the spinning wheel */
     lv_draw_buf_t *draw_buf = lv_draw_buf_create(size, size,
-                                                  LV_COLOR_FORMAT_ARGB8888,
+                                                  LV_COLOR_FORMAT_RGB565,
                                                   LV_STRIDE_AUTO);
+    /* RGB565: 2 bytes/px vs 4 for ARGB8888 – halves canvas memory */
     LV_ASSERT_MALLOC(draw_buf);
     lv_draw_buf_clear(draw_buf, NULL);
 

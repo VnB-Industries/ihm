@@ -43,10 +43,30 @@ static void on_wheel_result(lv_obj_t *wf, uint16_t seg_index,
             break;
         case MODIFIER_MALUS:
             lv_label_set_text(s_result_label,
-                LV_SYMBOL_WARNING "  MALUS obtenu !\nChoisissez qui l'écope.");
+                LV_SYMBOL_WARNING "  MALUS obtenu !\nChoisissez qui l'ecope.");
             lv_obj_set_style_text_color(s_result_label,
                 lv_color_hex(0xD50000), LV_PART_MAIN);
             break;
+        case MODIFIER_TIMEOUT_ADD: {
+            int mins = db_get_config("timeout_modifier_minutes", 5);
+            char tbuf[64];
+            lv_snprintf(tbuf, sizeof(tbuf),
+                LV_SYMBOL_PAUSE "  +%d min !\nChoisissez qui attend.", mins);
+            lv_label_set_text(s_result_label, tbuf);
+            lv_obj_set_style_text_color(s_result_label,
+                lv_color_hex(0xFF6D00), LV_PART_MAIN);
+            break;
+        }
+        case MODIFIER_TIMEOUT_REMOVE: {
+            int mins = db_get_config("timeout_modifier_minutes", 5);
+            char tbuf[64];
+            lv_snprintf(tbuf, sizeof(tbuf),
+                LV_SYMBOL_PLAY "  -%d min !\nChoisissez qui profite.", mins);
+            lv_label_set_text(s_result_label, tbuf);
+            lv_obj_set_style_text_color(s_result_label,
+                lv_color_hex(0x0091EA), LV_PART_MAIN);
+            break;
+        }
         default:
             lv_label_set_text(s_result_label, "Rien cette fois...");
             lv_obj_set_style_text_color(s_result_label,

@@ -3,13 +3,16 @@
 #include "wheel_fortune.h"
 #include "game_logic.h"
 #include "game_db.h"
+#include <time.h>
 
 static lv_obj_t    *s_screen;
 static lv_obj_t    *s_wheel;
 static lv_obj_t    *s_user_label;
 static lv_obj_t    *s_result_label;
+static lv_obj_t    *s_cooldown_label;
 static lv_obj_t    *s_spin_btn;
 static lv_obj_t    *s_bonus_btn;
+static lv_timer_t  *s_cooldown_timer = NULL;
 
 static wf_segment_t s_segments[WHEEL_FORTUNE_MAX_SEGMENTS];
 static uint8_t      s_seg_count = 0;
@@ -22,6 +25,64 @@ static void set_spin_btn_enabled(bool en)
     else    lv_obj_add_state(s_spin_btn,   LV_STATE_DISABLED);
 }
 
+static void cooldown_timer_cb(lv_timer_t *t)
+{
+    (void)t;
+    user_record_t u;
+    if (db_get_user(game_get_active_user(), &u) != 0) return;
+
+    int cooldown = db_get_config("spin_cooldown_seconds", 0);
+    int64_t elapsed  = (int64_t)time(NULL) - u.last_spin_epoch;
+    int64_t remaining = (int64_t)cooldown - elapsed;
+
+    if (remaining <= 0) {
+        lv_label_set_text(s_cooldown_label, "");
+        lv_obj_add_flag(s_cooldown_label, LV_OBJ_FLAG_HIDDEN);
+        set_spin_btn_enabled(true);
+        lv_timer_delete(s_cooldown_timer);
+        s_cooldown_timer = NULL;
+    } else {
+        char buf[32];
+        lv_snprintf(buf, sizeof(buf), LV_SYMBOL_PAUSE "  Attendre %ds",
+                    (int)remaining);
+        lv_label_set_text(s_cooldown_label, buf);
+    }
+}
+
+/* Check cooldown state on screen entry or after a spin.
+ * Disables the spin button and starts the 1-s ticker if still cooling down. */
+static void update_cooldown_state(void)
+{
+    /* NOTE: no early-exit for spin_cooldown==0 — a TIMEOUT_ADD modifier sets
+     * last_spin_epoch to a future value, so remaining = spin_cd - elapsed will
+     * be positive even when spin_cd = 0 (elapsed becomes negative). */
+    user_record_t u;
+    if (db_get_user(game_get_active_user(), &u) != 0) return;
+
+    int cooldown = db_get_config("spin_cooldown_seconds", 0);
+    int64_t elapsed   = (int64_t)time(NULL) - u.last_spin_epoch;
+    int64_t remaining = (int64_t)cooldown - elapsed;
+
+    if (remaining <= 0) {
+        lv_obj_add_flag(s_cooldown_label, LV_OBJ_FLAG_HIDDEN);
+        set_spin_btn_enabled(true);
+        if (s_cooldown_timer) {
+            lv_timer_delete(s_cooldown_timer);
+            s_cooldown_timer = NULL;
+        }
+    } else {
+        char buf[32];
+        lv_snprintf(buf, sizeof(buf), LV_SYMBOL_PAUSE "  Attendre %ds",
+                    (int)remaining);
+        lv_label_set_text(s_cooldown_label, buf);
+        lv_obj_clear_flag(s_cooldown_label, LV_OBJ_FLAG_HIDDEN);
+        set_spin_btn_enabled(false);
+
+        if (!s_cooldown_timer)
+            s_cooldown_timer = lv_timer_create(cooldown_timer_cb, 1000, NULL);
+    }
+}
+
 /* ── wheel callback ─────────────────────────────────────────────────────── */
 
 static void on_wheel_result(lv_obj_t *wf, uint16_t seg_index,
@@ -32,15 +93,16 @@ static void on_wheel_result(lv_obj_t *wf, uint16_t seg_index,
     int cl = (int)seg->value;
     char buf[48];
     lv_snprintf(buf, sizeof(buf),
-                cl == 0 ? "Chance ! 0 cL \xF0\x9F\x8D\xB9"
+                cl == 0 ? "Chance ! 0 cL"
                         : "Tu bois %d cL !", cl);
     lv_label_set_text(s_result_label, buf);
 
     bool bonus_triggered = game_on_basic_spin(game_get_active_user(), cl);
     if (bonus_triggered) {
         lv_obj_clear_flag(s_bonus_btn, LV_OBJ_FLAG_HIDDEN);
+        /* Cooldown still applies after bonus wheel; will be checked on SCREEN_WHEEL re-entry */
     } else {
-        set_spin_btn_enabled(true);
+        update_cooldown_state();
     }
 }
 
@@ -106,6 +168,14 @@ void scr_gaming_init(void)
     lv_label_set_long_mode(s_result_label, LV_LABEL_LONG_WRAP);
     lv_obj_align(s_result_label, LV_ALIGN_RIGHT_MID, -60, -70);
 
+    /* Cooldown label — hidden until a cooldown is active */
+    s_cooldown_label = lv_label_create(s_screen);
+    lv_label_set_text(s_cooldown_label, "");
+    lv_obj_set_style_text_color(s_cooldown_label, lv_color_hex(0xF5C518), LV_PART_MAIN);
+    lv_obj_set_style_text_align(s_cooldown_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_align(s_cooldown_label, LV_ALIGN_RIGHT_MID, -70, -130);
+    lv_obj_add_flag(s_cooldown_label, LV_OBJ_FLAG_HIDDEN);
+
     /* Spin button */
     s_spin_btn = lv_btn_create(s_screen);
     lv_obj_set_size(s_spin_btn, 220, 64);
@@ -158,7 +228,31 @@ void scr_gaming_refresh(void)
     game_compute_wheel_segments(&u, s_segments, &s_seg_count);
     wheel_fortune_set_segments(s_wheel, s_segments, s_seg_count);
 
-    lv_label_set_text(s_result_label, "Appuyez sur Tourner !");
+    /* Show confirmation if a modifier was just applied by this user */
+    if (u.given_modifier != (int)MODIFIER_NONE && u.given_to_id >= 0) {
+        user_record_t tgt;
+        const char *tname = "?";
+        if (db_get_user(u.given_to_id, &tgt) == 0) tname = tgt.name;
+        const char *mstr;
+        switch ((modifier_type_t)u.given_modifier) {
+            case MODIFIER_BONUS:          mstr = "Bonus";   break;
+            case MODIFIER_MALUS:          mstr = "Malus";   break;
+            case MODIFIER_TIMEOUT_ADD:    mstr = "+Temps";  break;
+            case MODIFIER_TIMEOUT_REMOVE: mstr = "-Temps";  break;
+            default:                      mstr = "?";        break;
+        }
+        char mbuf[80];
+        lv_snprintf(mbuf, sizeof(mbuf), "%s donne a %s !", mstr, tname);
+        lv_label_set_text(s_result_label, mbuf);
+    } else {
+        lv_label_set_text(s_result_label, "Appuyez sur Tourner !");
+    }
     lv_obj_add_flag(s_bonus_btn, LV_OBJ_FLAG_HIDDEN);
-    set_spin_btn_enabled(true);
+
+    /* Kill any leftover cooldown timer from a previous session */
+    if (s_cooldown_timer) {
+        lv_timer_delete(s_cooldown_timer);
+        s_cooldown_timer = NULL;
+    }
+    update_cooldown_state();
 }

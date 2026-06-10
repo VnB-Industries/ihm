@@ -18,6 +18,12 @@ static int exec_sql(const char *sql)
     return rc;
 }
 
+/* Silently execute – used for idempotent migrations that may fail (e.g. ADD COLUMN) */
+static void exec_sql_quiet(const char *sql)
+{
+    sqlite3_exec(s_db, sql, NULL, NULL, NULL);
+}
+
 static void fill_user(sqlite3_stmt *stmt, user_record_t *u)
 {
     u->id             = sqlite3_column_int(stmt, 0);
@@ -30,11 +36,12 @@ static void fill_user(sqlite3_stmt *stmt, user_record_t *u)
     u->total_cl       = sqlite3_column_int(stmt, 5);
     u->given_modifier = sqlite3_column_int(stmt, 6);
     u->given_to_id    = sqlite3_column_int(stmt, 7);
+    u->last_spin_epoch = sqlite3_column_int64(stmt, 8);
 }
 
 static const char k_user_select[] =
     "SELECT id, name, bonus, malus, wheel_trigger, total_cl,"
-    "       given_modifier, given_to_id FROM users";
+    "       given_modifier, given_to_id, last_spin_epoch FROM users";
 
 /* ── public API ─────────────────────────────────────────────────────────── */
 
@@ -68,10 +75,23 @@ int db_init(const char *path)
     /* Insert default config values (ignored if already present) */
     exec_sql(
         "INSERT OR IGNORE INTO game_config (key, value) VALUES"
-        "  ('wheel_trigger_chance',       20),"
-        "  ('bonus_wheel_bonus_weight',    1),"
-        "  ('bonus_wheel_nothing_weight',  2),"
-        "  ('bonus_wheel_malus_weight',    1);"
+        "  ('wheel_trigger_chance',            20),"
+        "  ('bonus_wheel_bonus_weight',          1),"
+        "  ('bonus_wheel_nothing_weight',        2),"
+        "  ('bonus_wheel_malus_weight',          1),"
+        "  ('bonus_wheel_timeout_add_weight',    1),"
+        "  ('bonus_wheel_timeout_remove_weight', 1),"
+        "  ('max_bonus_stack',                   5),"
+        "  ('max_malus_stack',                   5),"
+        "  ('spin_cooldown_seconds',             0),"
+        "  ('timeout_modifier_minutes',          5);"
+    );
+
+    /* Schema migration: add last_spin_epoch column if not present yet.
+     * SQLite returns an error if the column already exists – we ignore it. */
+    exec_sql_quiet(
+        "ALTER TABLE users ADD COLUMN"
+        " last_spin_epoch INTEGER NOT NULL DEFAULT 0;"
     );
 
     return 0;
@@ -139,17 +159,19 @@ int db_update_user(const user_record_t *u)
 
     const char *sql =
         "UPDATE users SET bonus=?, malus=?, wheel_trigger=?, total_cl=?,"
-        "                 given_modifier=?, given_to_id=? WHERE id=?;";
+        "                 given_modifier=?, given_to_id=?, last_spin_epoch=?"
+        " WHERE id=?;";
 
     sqlite3_stmt *stmt = NULL;
     if (sqlite3_prepare_v2(s_db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
-    sqlite3_bind_int(stmt, 1, u->bonus);
-    sqlite3_bind_int(stmt, 2, u->malus);
-    sqlite3_bind_int(stmt, 3, u->wheel_trigger);
-    sqlite3_bind_int(stmt, 4, u->total_cl);
-    sqlite3_bind_int(stmt, 5, u->given_modifier);
-    sqlite3_bind_int(stmt, 6, u->given_to_id);
-    sqlite3_bind_int(stmt, 7, u->id);
+    sqlite3_bind_int  (stmt, 1, u->bonus);
+    sqlite3_bind_int  (stmt, 2, u->malus);
+    sqlite3_bind_int  (stmt, 3, u->wheel_trigger);
+    sqlite3_bind_int  (stmt, 4, u->total_cl);
+    sqlite3_bind_int  (stmt, 5, u->given_modifier);
+    sqlite3_bind_int  (stmt, 6, u->given_to_id);
+    sqlite3_bind_int64(stmt, 7, u->last_spin_epoch);
+    sqlite3_bind_int  (stmt, 8, u->id);
 
     int rc = (sqlite3_step(stmt) == SQLITE_DONE) ? 0 : -1;
     sqlite3_finalize(stmt);

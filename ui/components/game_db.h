@@ -12,14 +12,15 @@ extern "C" {
 #define GAME_DB_NAME_LEN   64
 
 typedef struct {
-    int  id;
-    char name[GAME_DB_NAME_LEN];
-    int  bonus;          /* active bonus  – shifts wheel values down */
-    int  malus;          /* active malus  – shifts wheel values up   */
-    int  wheel_trigger;  /* bonus-wheel appearance counter            */
-    int  total_cl;       /* cumulative cL drank                       */
-    int  given_modifier; /* +1 = gave bonus, -1 = gave malus, 0 = none */
-    int  given_to_id;    /* user-id of recipient, -1 = none           */
+    int     id;
+    char    name[GAME_DB_NAME_LEN];
+    int     bonus;             /* active bonus  - shifts wheel values down */
+    int     malus;             /* active malus  - shifts wheel values up   */
+    int     wheel_trigger;     /* bonus-wheel appearance counter            */
+    int     total_cl;          /* cumulative cL drank                       */
+    int     given_modifier;    /* +1 = gave bonus, -1 = gave malus, 0 = none */
+    int     given_to_id;       /* user-id of recipient, -1 = none           */
+    int64_t last_spin_epoch;   /* Unix timestamp of last basic spin         */
 } user_record_t;
 
 /**

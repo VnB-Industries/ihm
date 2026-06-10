@@ -1,6 +1,7 @@
 #include "game_logic.h"
 #include "game_db.h"
 #include "lvgl/lvgl.h"
+#include <time.h>
 
 /* ── session state ──────────────────────────────────────────────────────── */
 
@@ -47,13 +48,17 @@ void game_compute_wheel_segments(const user_record_t *u,
 
 void game_compute_bonus_segments(wf_segment_t *segs, uint8_t *count)
 {
-    int wb = db_get_config("bonus_wheel_bonus_weight",   1);
-    int wn = db_get_config("bonus_wheel_nothing_weight", 2);
-    int wm = db_get_config("bonus_wheel_malus_weight",   1);
+    int wb  = db_get_config("bonus_wheel_bonus_weight",          1);
+    int wn  = db_get_config("bonus_wheel_nothing_weight",        2);
+    int wm  = db_get_config("bonus_wheel_malus_weight",          1);
+    int wta = db_get_config("bonus_wheel_timeout_add_weight",    1);
+    int wtr = db_get_config("bonus_wheel_timeout_remove_weight", 1);
 
-    if (wb < 0) wb = 0;
-    if (wn < 0) wn = 0;
-    if (wm < 0) wm = 0;
+    if (wb  < 0) wb  = 0;
+    if (wn  < 0) wn  = 0;
+    if (wm  < 0) wm  = 0;
+    if (wta < 0) wta = 0;
+    if (wtr < 0) wtr = 0;
 
     uint8_t n = 0;
     for (int i = 0; i < wb && n < WHEEL_FORTUNE_MAX_SEGMENTS; i++, n++) {
@@ -70,6 +75,16 @@ void game_compute_bonus_segments(wf_segment_t *segs, uint8_t *count)
         segs[n].label = "MALUS";
         segs[n].color = lv_color_hex(0xD50000);
         segs[n].value = BONUS_WHEEL_VAL_MALUS;
+    }
+    for (int i = 0; i < wta && n < WHEEL_FORTUNE_MAX_SEGMENTS; i++, n++) {
+        segs[n].label = "+TEMPS";
+        segs[n].color = lv_color_hex(0xFF6D00); /* deep orange - add time = bad */
+        segs[n].value = BONUS_WHEEL_VAL_TIMEOUT_ADD;
+    }
+    for (int i = 0; i < wtr && n < WHEEL_FORTUNE_MAX_SEGMENTS; i++, n++) {
+        segs[n].label = "-TEMPS";
+        segs[n].color = lv_color_hex(0x0091EA); /* light blue - remove time = good */
+        segs[n].value = BONUS_WHEEL_VAL_TIMEOUT_REMOVE;
     }
 
     /* Fallback: one of each if all weights are 0 */
@@ -90,6 +105,7 @@ bool game_on_basic_spin(int user_id, int cl_value)
     if (db_get_user(user_id, &u) != 0) return false;
 
     u.total_cl += cl_value;
+    u.last_spin_epoch = (int64_t)time(NULL);
 
     int chance = db_get_config("wheel_trigger_chance", 20);
     bool triggered = false;
@@ -116,8 +132,10 @@ modifier_type_t game_on_bonus_spin(int user_id, uint16_t seg_index,
     }
 
     uint32_t val = segs[seg_index].value;
-    if (val == BONUS_WHEEL_VAL_BONUS) return MODIFIER_BONUS;
-    if (val == BONUS_WHEEL_VAL_MALUS) return MODIFIER_MALUS;
+    if (val == BONUS_WHEEL_VAL_BONUS)          return MODIFIER_BONUS;
+    if (val == BONUS_WHEEL_VAL_MALUS)          return MODIFIER_MALUS;
+    if (val == BONUS_WHEEL_VAL_TIMEOUT_ADD)    return MODIFIER_TIMEOUT_ADD;
+    if (val == BONUS_WHEEL_VAL_TIMEOUT_REMOVE) return MODIFIER_TIMEOUT_REMOVE;
     return MODIFIER_NONE;
 }
 
@@ -125,16 +143,43 @@ void game_apply_modifier(int giver_id, int target_id, modifier_type_t type)
 {
     if (type == MODIFIER_NONE) return;
 
-    user_record_t giver, target;
+    user_record_t giver;
     if (db_get_user(giver_id, &giver) != 0) return;
-    if (db_get_user(target_id, &target) != 0) return;
 
-    giver.given_modifier = (int)type;  /* +1 = gave bonus, -1 = gave malus */
+    giver.given_modifier = (int)type;
     giver.given_to_id    = target_id;
 
-    if (type == MODIFIER_BONUS) target.bonus++;
-    else                        target.malus++;
+    int max_bonus = db_get_config("max_bonus_stack", 5);
+    int max_malus = db_get_config("max_malus_stack", 5);
+    int timeout_s = db_get_config("timeout_modifier_minutes", 5) * 60;
 
-    db_update_user(&giver);
-    db_update_user(&target);
+    /* Helper lambda-equivalent: apply effect to a user_record_t */
+#define APPLY_MOD(rec) \
+    do { \
+        if      (type == MODIFIER_BONUS          && (rec).bonus < max_bonus) (rec).bonus++; \
+        else if (type == MODIFIER_MALUS          && (rec).malus < max_malus) (rec).malus++; \
+        else if (type == MODIFIER_TIMEOUT_ADD) { \
+            /* Anchor to NOW so the timeout is always in the future, regardless \
+             * of when the user last spun.  Stack with existing timeout. */ \
+            int64_t _now = (int64_t)time(NULL); \
+            int64_t _base = (rec).last_spin_epoch > _now ? (rec).last_spin_epoch : _now; \
+            (rec).last_spin_epoch = _base + timeout_s; \
+        } \
+        else if (type == MODIFIER_TIMEOUT_REMOVE) { \
+            (rec).last_spin_epoch -= timeout_s; \
+            if ((rec).last_spin_epoch < 0) (rec).last_spin_epoch = 0; \
+        } \
+    } while (0)
+
+    if (giver_id == target_id) {
+        APPLY_MOD(giver);
+        db_update_user(&giver);
+    } else {
+        user_record_t target;
+        if (db_get_user(target_id, &target) != 0) { db_update_user(&giver); return; }
+        APPLY_MOD(target);
+        db_update_user(&giver);
+        db_update_user(&target);
+    }
+#undef APPLY_MOD
 }

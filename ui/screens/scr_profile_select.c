@@ -71,7 +71,7 @@ void scr_profile_select_refresh(void)
     if (count == 0) {
         lv_obj_t *hint = lv_label_create(s_list_cont);
         lv_label_set_text(hint,
-            "Aucun joueur.\nAjoutez-en dans Paramètres " LV_SYMBOL_SETTINGS ".");
+            "Aucun joueur.\nAjoutez-en dans Parametres " LV_SYMBOL_SETTINGS ".");
         lv_obj_set_style_text_color(hint, lv_color_hex(0x888888), LV_PART_MAIN);
         lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
         lv_obj_set_width(hint, 500);
