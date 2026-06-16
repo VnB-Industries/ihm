@@ -1,2 +1,8 @@
 preview-build
 .cache.json
+build/
+build-*/
+.third_party_build/
+third_party_build/
+**/external-*
+**/lvgl_external-prefix/
