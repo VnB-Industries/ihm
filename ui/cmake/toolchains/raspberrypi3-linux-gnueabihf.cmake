@@ -1,0 +1,35 @@
+set(CMAKE_SYSTEM_NAME Linux)
+set(CMAKE_SYSTEM_PROCESSOR arm)
+
+set(RPI_TRIPLE "arm-linux-gnueabihf" CACHE STRING "Cross compiler target triple")
+set(RPI_TOOLCHAIN_PREFIX "${RPI_TRIPLE}" CACHE STRING "Cross compiler prefix")
+
+if(NOT DEFINED CMAKE_SYSROOT AND DEFINED ENV{RPI_SYSROOT})
+    set(CMAKE_SYSROOT "$ENV{RPI_SYSROOT}" CACHE PATH "Raspberry Pi sysroot")
+endif()
+
+if(NOT DEFINED CMAKE_C_COMPILER)
+    set(CMAKE_C_COMPILER "${RPI_TOOLCHAIN_PREFIX}-gcc")
+endif()
+
+if(NOT DEFINED CMAKE_CXX_COMPILER)
+    set(CMAKE_CXX_COMPILER "${RPI_TOOLCHAIN_PREFIX}-g++")
+endif()
+
+set(CMAKE_FIND_ROOT_PATH "${CMAKE_SYSROOT}")
+set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
+
+if(CMAKE_SYSROOT)
+    set(ENV{PKG_CONFIG_SYSROOT_DIR} "${CMAKE_SYSROOT}")
+
+    if(NOT DEFINED RPI_PKG_CONFIG_LIBDIR)
+        set(RPI_PKG_CONFIG_LIBDIR
+            "${CMAKE_SYSROOT}/usr/lib/${RPI_TRIPLE}/pkgconfig:${CMAKE_SYSROOT}/usr/lib/pkgconfig:${CMAKE_SYSROOT}/usr/share/pkgconfig"
+            CACHE STRING "pkg-config search path inside the Pi sysroot")
+    endif()
+
+    set(ENV{PKG_CONFIG_LIBDIR} "${RPI_PKG_CONFIG_LIBDIR}")
+endif()

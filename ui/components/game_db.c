@@ -72,6 +72,13 @@ int db_init(const char *path)
         ");"
     );
 
+    exec_sql(
+        "CREATE TABLE IF NOT EXISTS game_text_config ("
+        "  key   TEXT PRIMARY KEY,"
+        "  value TEXT NOT NULL DEFAULT ''"
+        ");"
+    );
+
     /* Insert default config values (ignored if already present) */
     exec_sql(
         "INSERT OR IGNORE INTO game_config (key, value) VALUES"
@@ -85,6 +92,13 @@ int db_init(const char *path)
         "  ('max_malus_stack',                   5),"
         "  ('spin_cooldown_seconds',             0),"
         "  ('timeout_modifier_minutes',          5);"
+    );
+
+    exec_sql(
+        "INSERT OR IGNORE INTO game_text_config (key, value) VALUES"
+        "  ('home_banner_text_1', 'L''abus d''eau est dangereux pour la sante.'),"
+        "  ('home_banner_text_2', ''),"
+        "  ('home_banner_text_3', '');"
     );
 
     /* Schema migration: add last_spin_epoch column if not present yet.
@@ -219,6 +233,57 @@ int db_set_config(const char *key, int value)
     if (sqlite3_prepare_v2(s_db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
     sqlite3_bind_text(stmt, 1, key, -1, SQLITE_STATIC);
     sqlite3_bind_int(stmt, 2, value);
+
+    int rc = (sqlite3_step(stmt) == SQLITE_DONE) ? 0 : -1;
+    sqlite3_finalize(stmt);
+    return rc;
+}
+
+int db_get_text_config(const char *key, char *out, int out_size,
+                        const char *default_val)
+{
+    if (!out || out_size <= 0) return -1;
+
+    out[0] = '\0';
+    if (default_val) {
+        strncpy(out, default_val, (size_t)(out_size - 1));
+        out[out_size - 1] = '\0';
+    }
+
+    if (!s_db || !key) return -1;
+
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(s_db,
+            "SELECT value FROM game_text_config WHERE key=?;",
+            -1, &stmt, NULL) != SQLITE_OK) {
+        return -1;
+    }
+
+    sqlite3_bind_text(stmt, 1, key, -1, SQLITE_STATIC);
+
+    int rc = -1;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char *val = (const char *)sqlite3_column_text(stmt, 0);
+        strncpy(out, val ? val : "", (size_t)(out_size - 1));
+        out[out_size - 1] = '\0';
+        rc = 0;
+    }
+
+    sqlite3_finalize(stmt);
+    return rc;
+}
+
+int db_set_text_config(const char *key, const char *value)
+{
+    if (!s_db || !key || !value) return -1;
+
+    const char *sql =
+        "INSERT OR REPLACE INTO game_text_config (key, value) VALUES (?,?);";
+
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(s_db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(stmt, 1, key, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, value, -1, SQLITE_STATIC);
 
     int rc = (sqlite3_step(stmt) == SQLITE_DONE) ? 0 : -1;
     sqlite3_finalize(stmt);

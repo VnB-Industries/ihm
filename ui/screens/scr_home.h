@@ -8,6 +8,7 @@ extern "C" {
 #include "lvgl/lvgl.h"
 
 void      scr_home_init(void);
+void      scr_home_refresh(void);
 lv_obj_t *scr_home_get(void);
 
 #ifdef __cplusplus

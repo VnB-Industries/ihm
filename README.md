@@ -1,7 +1,7 @@
 # Ricardo – IHM jeu de la roue
 
 Jeu de boisson sur LVGL v9 / SDL2 (simulateur PC) et cible embarquee.  
-Ecran 800x480 (5 pouces). Persistance SQLite3.
+Ecran 1024x600 (7 pouces). Persistance SQLite3.
 
 ## Ecrans
 
@@ -51,6 +51,59 @@ cd lv_port_pc_vscode/build
 make -j$(nproc)
 ./bin/main
 ```
+
+## Build (cible Raspberry Pi)
+
+Le binaire cible est `ihm/ui/ihm.app` et son build ne depend pas du dossier `lv_port_pc_vscode`.
+
+Le depot `ihm` embarque maintenant ses dependances dans:
+
+- `ihm/ui/third_party/lvgl`
+- `ihm/ui/third_party/lv_drivers`
+
+Important: pour la cible Linux sur Raspberry Pi avec LVGL v9, `lv_drivers` n'est pas le chemin actif pour l'affichage et le tactile.
+Le depot `lv_drivers` est conserve dans le projet, mais le build Pi utilise les pilotes Linux integres a LVGL v9 (`fbdev`, `drm`, `evdev`).
+Les options LVGL lourdes liees au vectoriel sont aussi desactivees par defaut pour la cible Pi: `LV_USE_VECTOR_GRAPHIC`, `LV_USE_THORVG_INTERNAL`, `LV_USE_THORVG_EXTERNAL`, `LV_USE_LOTTIE` et `LV_USE_SVG`.
+Cela evite de tirer ThorVG au link et garde le binaire plus leger.
+
+Configuration native Linux:
+
+```bash
+cd ihm/ui
+cmake -B build \
+  -DIHM_USE_LINUX_FBDEV=ON \
+  -DIHM_USE_LINUX_DRM=OFF \
+  -DIHM_SCREEN_WIDTH=1024 \
+  -DIHM_SCREEN_HEIGHT=600 \
+  -DIHM_FBDEV_DEVICE=/dev/fb0 \
+  -DIHM_EVDEV_DEVICE=/dev/input/event0
+cmake --build build -j$(nproc)
+```
+
+Cross-compilation Raspberry Pi avec sysroot monte via SSHFS:
+
+```bash
+mkdir -p /home/vvicier/sdk/pi-sysroot
+sshfs ricardo@192.168.1.2:/ /home/vvicier/sdk/pi-sysroot
+```
+
+Puis lancer la configuration CMake avec le toolchain AArch64 correspondant a l'image Pi:
+
+```bash
+cd ihm/ui
+cmake -B build-rpi-mount \
+  -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/raspberrypi3-linux-aarch64.cmake \
+  -DCMAKE_SYSROOT=/home/vvicier/sdk/pi-sysroot \
+  -DIHM_USE_LINUX_FBDEV=ON \
+  -DIHM_USE_LINUX_DRM=OFF \
+  -DIHM_SCREEN_WIDTH=1024 \
+  -DIHM_SCREEN_HEIGHT=600 \
+  -DIHM_EVDEV_DEVICE=/dev/input/event2
+cmake --build build-rpi-mount -j$(nproc)
+```
+
+Le fichier `cmake/toolchains/raspberrypi3-linux-aarch64.cmake` est le bon choix pour une image Raspberry Pi OS 64 bits. 
+Si vous utilisez une image 32 bits, conservez `cmake/toolchains/raspberrypi3-linux-gnueabihf.cmake` et un sysroot `armhf` correspondant.
 
 ## Structure
 

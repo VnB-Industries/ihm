@@ -26,19 +26,20 @@ static void on_target_clicked(lv_event_t *e)
 void scr_give_modifier_init(void)
 {
     s_screen = lv_obj_create(NULL);
+    lv_obj_set_size(s_screen, SCREEN_W, SCREEN_H);
     lv_obj_set_style_bg_color(s_screen, lv_color_hex(0x1A1A2E), LV_PART_MAIN);
 
     /* Dynamic title (set at refresh time) */
     s_title_label = lv_label_create(s_screen);
     lv_obj_set_style_text_color(s_title_label, lv_color_hex(0xF5C518), LV_PART_MAIN);
     lv_obj_set_style_text_align(s_title_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-    lv_obj_set_width(s_title_label, 740);
+    lv_obj_set_width(s_title_label, SCREEN_INNER_W);
     lv_label_set_long_mode(s_title_label, LV_LABEL_LONG_WRAP);
     lv_obj_align(s_title_label, LV_ALIGN_TOP_MID, 0, 16);
 
     /* Scrollable player grid */
     s_list_cont = lv_obj_create(s_screen);
-    lv_obj_set_size(s_list_cont, 760, 380);
+    lv_obj_set_size(s_list_cont, SCREEN_INNER_W, SCREEN_H - 100);
     lv_obj_align(s_list_cont, LV_ALIGN_BOTTOM_MID, 0, -10);
     lv_obj_set_style_bg_color(s_list_cont, lv_color_hex(0x16213E), LV_PART_MAIN);
     lv_obj_set_style_border_width(s_list_cont, 0, LV_PART_MAIN);
@@ -57,6 +58,7 @@ void scr_give_modifier_refresh(void)
 {
     modifier_type_t mod = game_get_pending_modifier();
     int active_id = game_get_active_user();
+    bool allow_nobody = (mod == MODIFIER_BONUS || mod == MODIFIER_MALUS);
 
     /* Title + button colour depend on modifier type */
     lv_color_t col;
@@ -96,6 +98,25 @@ void scr_give_modifier_refresh(void)
     }
 
     lv_obj_clean(s_list_cont);
+
+    if (allow_nobody) {
+        lv_obj_t *btn_none = lv_btn_create(s_list_cont);
+        lv_obj_set_size(btn_none, 210, 80);
+        lv_obj_set_style_bg_color(btn_none, lv_color_hex(0x3F3F46), LV_PART_MAIN);
+        lv_obj_set_style_radius(btn_none, 10, LV_PART_MAIN);
+        lv_obj_add_event_cb(btn_none, on_target_clicked, LV_EVENT_CLICKED,
+                            (void *)(intptr_t)-1);
+
+        lv_obj_t *lbl_none = lv_label_create(btn_none);
+        lv_label_set_text(lbl_none, "Personne");
+        lv_obj_set_style_text_color(lbl_none, lv_color_hex(0xEAEAEA), LV_PART_MAIN);
+        lv_obj_align(lbl_none, LV_ALIGN_TOP_MID, 0, 6);
+
+        lv_obj_t *sub_none = lv_label_create(btn_none);
+        lv_label_set_text(sub_none, "Ne rien appliquer");
+        lv_obj_set_style_text_color(sub_none, lv_color_hex(0xB0B0B0), LV_PART_MAIN);
+        lv_obj_align(sub_none, LV_ALIGN_BOTTOM_MID, 0, -4);
+    }
 
     user_record_t users[GAME_DB_MAX_USERS];
     int count = db_get_all_users(users, GAME_DB_MAX_USERS);

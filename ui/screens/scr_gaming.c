@@ -4,6 +4,11 @@
 #include "game_logic.h"
 #include "game_db.h"
 #include <time.h>
+#include <stdio.h>
+#if LV_USE_LOTTIE
+#include <libgen.h>
+#include <unistd.h>
+#endif
 
 static lv_obj_t    *s_screen;
 static lv_obj_t    *s_wheel;
@@ -13,6 +18,11 @@ static lv_obj_t    *s_cooldown_label;
 static lv_obj_t    *s_spin_btn;
 static lv_obj_t    *s_bonus_btn;
 static lv_timer_t  *s_cooldown_timer = NULL;
+#if LV_USE_LOTTIE
+static lv_obj_t    *s_confetti = NULL;
+static uint32_t     s_confetti_buf[700 * 700];
+static lv_timer_t  *s_confetti_timer = NULL;
+#endif
 
 static wf_segment_t s_segments[WHEEL_FORTUNE_MAX_SEGMENTS];
 static uint8_t      s_seg_count = 0;
@@ -85,10 +95,83 @@ static void update_cooldown_state(void)
 
 /* ── wheel callback ─────────────────────────────────────────────────────── */
 
+#if LV_USE_LOTTIE
+static const char *resolve_confetti_path(void)
+{
+    static char resolved[512];
+    char exe[512];
+    ssize_t len = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+    if (len > 0) {
+        exe[len] = '\0';
+        char *dir = dirname(exe);
+        snprintf(resolved, sizeof(resolved), "%s/images/Confetti.json", dir);
+        FILE *f = fopen(resolved, "rb");
+        if (f) { fclose(f); return resolved; }
+    }
+    static const char *candidates[] = { "images/Confetti.json", "../images/Confetti.json" };
+    for (uint32_t i = 0; i < (uint32_t)(sizeof(candidates)/sizeof(candidates[0])); i++) {
+        FILE *f = fopen(candidates[i], "rb");
+        if (f) { fclose(f); return candidates[i]; }
+    }
+    return NULL;
+}
+
+static void confetti_hide_cb(lv_timer_t *t)
+{
+    (void)t;
+    if (s_confetti) lv_obj_add_flag(s_confetti, LV_OBJ_FLAG_HIDDEN);
+    s_confetti_timer = NULL;
+}
+
+static void confetti_preload(lv_obj_t *screen)
+{
+    const char *src = resolve_confetti_path();
+    if (src == NULL || s_confetti != NULL) return;
+    s_confetti = lv_lottie_create(screen);
+    lv_lottie_set_buffer(s_confetti, 700, 700, s_confetti_buf);
+    lv_lottie_set_src_file(s_confetti, src);
+    lv_obj_align(s_confetti, LV_ALIGN_CENTER, -170, 0);
+    lv_obj_add_flag(s_confetti, LV_OBJ_FLAG_HIDDEN);
+    /* Leave repeat_count as LV_ANIM_REPEAT_INFINITE (LVGL's default).
+       Setting it finite causes LVGL to free the anim pointer on completion,
+       leaving lottie->anim dangling -> segfault on the second spin. */
+}
+
+/* Replay without touching repeat_count: rewind via act_time and
+   schedule a one-shot timer to hide after one full cycle. */
+static void play_confetti_once(void)
+{
+    if (s_confetti == NULL) return;
+
+    lv_anim_t *anim = lv_lottie_get_anim(s_confetti);
+    if (anim == NULL) return;
+
+    /* Cancel any in-flight hide timer */
+    if (s_confetti_timer) {
+        lv_timer_delete(s_confetti_timer);
+        s_confetti_timer = NULL;
+    }
+
+    /* Rewind to frame 0 */
+    anim->act_time = 0;
+
+    lv_obj_move_foreground(s_confetti);
+    lv_obj_clear_flag(s_confetti, LV_OBJ_FLAG_HIDDEN);
+
+    /* Hide after one full cycle */
+    s_confetti_timer = lv_timer_create(confetti_hide_cb, (uint32_t)anim->duration, NULL);
+    lv_timer_set_repeat_count(s_confetti_timer, 1);
+}
+#endif
+
 static void on_wheel_result(lv_obj_t *wf, uint16_t seg_index,
                              const wf_segment_t *seg)
 {
     (void)wf; (void)seg_index;
+
+#if LV_USE_LOTTIE
+    play_confetti_once();
+#endif
 
     int cl = (int)seg->value;
     char buf[48];
@@ -111,6 +194,7 @@ static void on_wheel_result(lv_obj_t *wf, uint16_t seg_index,
 static void on_spin_clicked(lv_event_t *e)
 {
     (void)e;
+    if (lv_obj_has_state(s_spin_btn, LV_STATE_DISABLED)) return;
     if (wheel_fortune_is_spinning(s_wheel) || s_seg_count == 0) return;
 
     lv_label_set_text(s_result_label, "...");
@@ -119,6 +203,22 @@ static void on_spin_clicked(lv_event_t *e)
 
     uint16_t result = (uint16_t)(lv_rand(0, 0xFFFF) % s_seg_count);
     wheel_fortune_spin(s_wheel, 3500, result);
+}
+
+static void on_wheel_swipe_spin(lv_obj_t *wf, uint16_t swipe_strength)
+{
+    if (lv_obj_has_state(s_spin_btn, LV_STATE_DISABLED)) return;
+    if (wheel_fortune_is_spinning(s_wheel) || s_seg_count == 0) return;
+
+    uint16_t result = (uint16_t)(lv_rand(0, 0xFFFF) % s_seg_count);
+    uint32_t clamped_strength = LV_MIN((uint32_t)swipe_strength, 144U);
+    uint16_t full_turns = (uint16_t)(2U + clamped_strength / 16U);
+    uint32_t duration_ms = 4200U + clamped_strength * 12U;
+
+    lv_label_set_text(s_result_label, "...");
+    lv_obj_add_flag(s_bonus_btn, LV_OBJ_FLAG_HIDDEN);
+    set_spin_btn_enabled(false);
+    wheel_fortune_spin_ex(wf, duration_ms, result, full_turns);
 }
 
 static void on_bonus_clicked(lv_event_t *e)
@@ -138,18 +238,20 @@ static void on_back_clicked(lv_event_t *e)
 void scr_gaming_init(void)
 {
     s_screen = lv_obj_create(NULL);
+    lv_obj_set_size(s_screen, SCREEN_W, SCREEN_H);
     lv_obj_set_style_bg_color(s_screen, lv_color_hex(0x1A1A2E), LV_PART_MAIN);
 
     /* Title */
     lv_obj_t *title = lv_label_create(s_screen);
-    lv_label_set_text(title, "Roue de la Fortune");
+    lv_label_set_text(title, "Roue de l'Infortune");
     lv_obj_set_style_text_color(title, lv_color_hex(0xF5C518), LV_PART_MAIN);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 16);
 
     /* Wheel — left side, radius 180 (fits 480px height comfortably) */
     s_wheel = wheel_fortune_create(s_screen, 180);
-    lv_obj_align(s_wheel, LV_ALIGN_LEFT_MID, 16, 10);
+    lv_obj_align(s_wheel, LV_ALIGN_LEFT_MID, 180, 10);
     wheel_fortune_set_result_cb(s_wheel, on_wheel_result);
+    wheel_fortune_set_spin_request_cb(s_wheel, on_wheel_swipe_spin);
 
     /* User name + modifier info — top right */
     s_user_label = lv_label_create(s_screen);
@@ -208,6 +310,10 @@ void scr_gaming_init(void)
     lv_obj_t *lbl_back = lv_label_create(btn_back);
     lv_label_set_text(lbl_back, LV_SYMBOL_LEFT "  Retour");
     lv_obj_center(lbl_back);
+
+#if LV_USE_LOTTIE
+    confetti_preload(s_screen);
+#endif
 }
 
 lv_obj_t *scr_gaming_get(void) { return s_screen; }

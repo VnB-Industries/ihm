@@ -39,7 +39,14 @@ static lv_obj_t *s_lbl_max_malus;
 static lv_obj_t *s_lbl_cooldown;
 static lv_obj_t *s_user_list;
 static lv_obj_t *s_new_user_ta;
+static lv_obj_t *s_banner_ta_1;
+static lv_obj_t *s_banner_ta_2;
+static lv_obj_t *s_banner_ta_3;
 static lv_obj_t *s_kb;
+static lv_obj_t *s_delete_popup;
+static lv_obj_t *s_delete_popup_label;
+static int s_pending_delete_uid = -1;
+static char s_pending_delete_name[GAME_DB_NAME_LEN];
 
 /* PIN state */
 static char s_pin_buf[5] = {'\0'};
@@ -71,7 +78,7 @@ static void refresh_user_list(void)
     for (int i = 0; i < count; i++) {
         /* Row container */
         lv_obj_t *row = lv_obj_create(s_user_list);
-        lv_obj_set_size(row, 680, 48);
+        lv_obj_set_size(row, SCREEN_INNER_W, 48);
         lv_obj_set_style_bg_color(row, lv_color_hex(0x0F3460), LV_PART_MAIN);
         lv_obj_set_style_border_width(row, 0, LV_PART_MAIN);
         lv_obj_set_style_radius(row, 6, LV_PART_MAIN);
@@ -86,7 +93,7 @@ static void refresh_user_list(void)
         lv_obj_t *lbl = lv_label_create(row);
         lv_label_set_text(lbl, users[i].name);
         lv_obj_set_style_text_color(lbl, lv_color_hex(0xEAEAEA), LV_PART_MAIN);
-        lv_obj_set_width(lbl, 560);
+        lv_obj_set_width(lbl, SCREEN_INNER_W - 80);
 
         /* Delete button */
         lv_obj_t *del = lv_btn_create(row);
@@ -169,6 +176,20 @@ static void show_config_phase(void)
         db_get_config("bonus_wheel_timeout_remove_weight", 1), LV_ANIM_OFF);
     lv_slider_set_value(s_sld_timeout_mins,
         db_get_config("timeout_modifier_minutes", 5), LV_ANIM_OFF);
+
+    {
+        char b1[192];
+        char b2[192];
+        char b3[192];
+        db_get_text_config("home_banner_text_1", b1, sizeof(b1),
+            "L'abus d'eau est dangereux pour la sante.");
+        db_get_text_config("home_banner_text_2", b2, sizeof(b2), "");
+        db_get_text_config("home_banner_text_3", b3, sizeof(b3), "");
+        lv_textarea_set_text(s_banner_ta_1, b1);
+        lv_textarea_set_text(s_banner_ta_2, b2);
+        lv_textarea_set_text(s_banner_ta_3, b3);
+    }
+
     update_slider_labels();
 
     refresh_user_list();
@@ -246,6 +267,10 @@ static void on_save_clicked(lv_event_t *e)
                   lv_slider_get_value(s_sld_timeout_rem_w));
     db_set_config("timeout_modifier_minutes",
                   lv_slider_get_value(s_sld_timeout_mins));
+
+    db_set_text_config("home_banner_text_1", lv_textarea_get_text(s_banner_ta_1));
+    db_set_text_config("home_banner_text_2", lv_textarea_get_text(s_banner_ta_2));
+    db_set_text_config("home_banner_text_3", lv_textarea_get_text(s_banner_ta_3));
 }
 
 static void on_back_clicked(lv_event_t *e)
@@ -254,6 +279,8 @@ static void on_back_clicked(lv_event_t *e)
     /* Hide keyboard if visible */
     if (!lv_obj_has_flag(s_kb, LV_OBJ_FLAG_HIDDEN))
         lv_obj_add_flag(s_kb, LV_OBJ_FLAG_HIDDEN);
+    if (!lv_obj_has_flag(s_delete_popup, LV_OBJ_FLAG_HIDDEN))
+        lv_obj_add_flag(s_delete_popup, LV_OBJ_FLAG_HIDDEN);
     screen_manager_load(SCREEN_HOME);
 }
 
@@ -272,8 +299,40 @@ static void on_add_user_clicked(lv_event_t *e)
 static void on_delete_user(lv_event_t *e)
 {
     int uid = (int)(intptr_t)lv_event_get_user_data(e);
-    db_delete_user(uid);
-    refresh_user_list();
+    user_record_t user;
+    if(db_get_user(uid, &user) != 0) {
+        return;
+    }
+
+    s_pending_delete_uid = uid;
+    lv_snprintf(s_pending_delete_name, sizeof(s_pending_delete_name), "%s", user.name);
+
+    char msg[160];
+    lv_snprintf(msg, sizeof(msg), "Supprimer le joueur\n\"%s\" ?", s_pending_delete_name);
+    lv_label_set_text(s_delete_popup_label, msg);
+    lv_obj_clear_flag(s_delete_popup, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(s_delete_popup);
+}
+
+static void on_delete_confirmed(lv_event_t *e)
+{
+    (void)e;
+
+    if(s_pending_delete_uid >= 0) {
+        db_delete_user(s_pending_delete_uid);
+        s_pending_delete_uid = -1;
+        s_pending_delete_name[0] = '\0';
+        lv_obj_add_flag(s_delete_popup, LV_OBJ_FLAG_HIDDEN);
+        refresh_user_list();
+    }
+}
+
+static void on_delete_cancelled(lv_event_t *e)
+{
+    (void)e;
+    s_pending_delete_uid = -1;
+    s_pending_delete_name[0] = '\0';
+    lv_obj_add_flag(s_delete_popup, LV_OBJ_FLAG_HIDDEN);
 }
 
 static void on_ta_focused(lv_event_t *e)
@@ -298,7 +357,7 @@ static lv_obj_t *create_slider_row(lv_obj_t *parent, const char *caption,
                                     lv_obj_t **sld_out, lv_obj_t **val_lbl_out)
 {
     lv_obj_t *row = lv_obj_create(parent);
-    lv_obj_set_size(row, 680, 50);
+    lv_obj_set_size(row, SCREEN_INNER_W, 50);
     lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_border_width(row, 0, LV_PART_MAIN);
     lv_obj_set_style_pad_all(row, 0, LV_PART_MAIN);
@@ -307,12 +366,12 @@ static lv_obj_t *create_slider_row(lv_obj_t *parent, const char *caption,
     lv_obj_t *cap = lv_label_create(row);
     lv_label_set_text(cap, caption);
     lv_obj_set_style_text_color(cap, lv_color_hex(0xEAEAEA), LV_PART_MAIN);
-    lv_obj_set_width(cap, 240);
+    lv_obj_set_width(cap, 320);
     lv_obj_align(cap, LV_ALIGN_LEFT_MID, 0, 0);
 
     lv_obj_t *sld = lv_slider_create(row);
-    lv_obj_set_size(sld, 340, 14);
-    lv_obj_align(sld, LV_ALIGN_LEFT_MID, 250, 0);
+    lv_obj_set_size(sld, 450, 14);
+    lv_obj_align(sld, LV_ALIGN_LEFT_MID, 330, 0);
     lv_slider_set_range(sld, min_v, max_v);
     lv_obj_add_event_cb(sld, on_slider_changed, LV_EVENT_VALUE_CHANGED, NULL);
 
@@ -326,16 +385,44 @@ static lv_obj_t *create_slider_row(lv_obj_t *parent, const char *caption,
     return row;
 }
 
+static lv_obj_t *create_textarea_row(lv_obj_t *parent, const char *caption,
+                                     const char *placeholder,
+                                     lv_obj_t **ta_out)
+{
+    lv_obj_t *row = lv_obj_create(parent);
+    lv_obj_set_size(row, SCREEN_INNER_W, 84);
+    lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(row, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(row, 0, LV_PART_MAIN);
+    lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *cap = lv_label_create(row);
+    lv_label_set_text(cap, caption);
+    lv_obj_set_style_text_color(cap, lv_color_hex(0xEAEAEA), LV_PART_MAIN);
+    lv_obj_align(cap, LV_ALIGN_TOP_LEFT, 0, 0);
+
+    lv_obj_t *ta = lv_textarea_create(row);
+    lv_obj_set_size(ta, SCREEN_INNER_W, 50);
+    lv_obj_align(ta, LV_ALIGN_BOTTOM_LEFT, 0, 0);
+    lv_textarea_set_one_line(ta, true);
+    lv_textarea_set_placeholder_text(ta, placeholder);
+    lv_obj_add_event_cb(ta, on_ta_focused, LV_EVENT_FOCUSED, NULL);
+
+    *ta_out = ta;
+    return row;
+}
+
 /* ── public API ─────────────────────────────────────────────────────────── */
 
 void scr_parameters_init(void)
 {
     s_screen = lv_obj_create(NULL);
+    lv_obj_set_size(s_screen, SCREEN_W, SCREEN_H);
     lv_obj_set_style_bg_color(s_screen, lv_color_hex(0x1A1A2E), LV_PART_MAIN);
 
     /* ━━━━━━━━━━ PIN PANEL ━━━━━━━━━━ */
     s_pin_panel = lv_obj_create(s_screen);
-    lv_obj_set_size(s_pin_panel, 800, 480);
+    lv_obj_set_size(s_pin_panel, SCREEN_W, SCREEN_H);
     lv_obj_align(s_pin_panel, LV_ALIGN_CENTER, 0, 0);
     lv_obj_set_style_bg_color(s_pin_panel, lv_color_hex(0x1A1A2E), LV_PART_MAIN);
     lv_obj_set_style_border_width(s_pin_panel, 0, LV_PART_MAIN);
@@ -370,7 +457,7 @@ void scr_parameters_init(void)
 
     /* ━━━━━━━━━━ CONFIG PANEL ━━━━━━━━━━ */
     s_cfg_panel = lv_obj_create(s_screen);
-    lv_obj_set_size(s_cfg_panel, 800, 480);
+    lv_obj_set_size(s_cfg_panel, SCREEN_W, SCREEN_H);
     lv_obj_align(s_cfg_panel, LV_ALIGN_CENTER, 0, 0);
     lv_obj_set_style_bg_color(s_cfg_panel, lv_color_hex(0x1A1A2E), LV_PART_MAIN);
     lv_obj_set_style_border_width(s_cfg_panel, 0, LV_PART_MAIN);
@@ -384,7 +471,7 @@ void scr_parameters_init(void)
 
     /* Scrollable content area */
     lv_obj_t *scroll = lv_obj_create(s_cfg_panel);
-    lv_obj_set_size(scroll, 760, 390);
+    lv_obj_set_size(scroll, SCREEN_INNER_W, SCREEN_INNER_H);
     lv_obj_align(scroll, LV_ALIGN_TOP_MID, 0, 52);
     lv_obj_set_style_bg_color(scroll, lv_color_hex(0x16213E), LV_PART_MAIN);
     lv_obj_set_style_border_width(scroll, 0, LV_PART_MAIN);
@@ -433,6 +520,15 @@ void scr_parameters_init(void)
     create_slider_row(scroll, "Cooldown entre tours (s)", 0, 300,
                       &s_sld_cooldown, &s_lbl_cooldown);
 
+    /* Section: Banniere defilante */
+    lv_obj_t *sec_banner = lv_label_create(scroll);
+    lv_label_set_text(sec_banner, "Banniere defilante (home)");
+    lv_obj_set_style_text_color(sec_banner, lv_color_hex(0x888888), LV_PART_MAIN);
+
+    create_textarea_row(scroll, "Texte 1", "Message principal...", &s_banner_ta_1);
+    create_textarea_row(scroll, "Texte 2", "Message alternatif...", &s_banner_ta_2);
+    create_textarea_row(scroll, "Texte 3", "Message alternatif...", &s_banner_ta_3);
+
     /* Section: Joueurs */
     lv_obj_t *sec3 = lv_label_create(scroll);
     lv_label_set_text(sec3, "Joueurs");
@@ -440,7 +536,7 @@ void scr_parameters_init(void)
 
     /* Add-user row */
     lv_obj_t *add_row = lv_obj_create(scroll);
-    lv_obj_set_size(add_row, 680, 54);
+    lv_obj_set_size(add_row, SCREEN_INNER_W, 54);
     lv_obj_set_style_bg_opa(add_row, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_border_width(add_row, 0, LV_PART_MAIN);
     lv_obj_set_style_pad_all(add_row, 0, LV_PART_MAIN);
@@ -451,7 +547,7 @@ void scr_parameters_init(void)
     lv_obj_set_style_pad_gap(add_row, 10, LV_PART_MAIN);
 
     s_new_user_ta = lv_textarea_create(add_row);
-    lv_obj_set_size(s_new_user_ta, 440, 46);
+    lv_obj_set_size(s_new_user_ta, 620, 46);
     lv_textarea_set_one_line(s_new_user_ta, true);
     lv_textarea_set_placeholder_text(s_new_user_ta, "Nom du joueur...");
     lv_obj_add_event_cb(s_new_user_ta, on_ta_focused,
@@ -467,7 +563,7 @@ void scr_parameters_init(void)
 
     /* User list container */
     s_user_list = lv_obj_create(scroll);
-    lv_obj_set_size(s_user_list, 680, LV_SIZE_CONTENT);
+    lv_obj_set_size(s_user_list, SCREEN_INNER_W, LV_SIZE_CONTENT);
     lv_obj_set_style_bg_opa(s_user_list, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_border_width(s_user_list, 0, LV_PART_MAIN);
     lv_obj_set_style_pad_all(s_user_list, 0, LV_PART_MAIN);
@@ -477,7 +573,7 @@ void scr_parameters_init(void)
 
     /* Bottom buttons row */
     lv_obj_t *btn_row = lv_obj_create(s_cfg_panel);
-    lv_obj_set_size(btn_row, 760, 44);
+    lv_obj_set_size(btn_row, SCREEN_INNER_W, 44);
     lv_obj_align(btn_row, LV_ALIGN_BOTTOM_MID, 0, -6);
     lv_obj_set_style_bg_opa(btn_row, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_border_width(btn_row, 0, LV_PART_MAIN);
@@ -505,12 +601,52 @@ void scr_parameters_init(void)
 
     /* Keyboard — overlay at bottom, hidden by default */
     s_kb = lv_keyboard_create(s_screen);
-    lv_obj_set_size(s_kb, 800, 220);
+    lv_obj_set_size(s_kb, SCREEN_W, 220);
     lv_obj_align(s_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_keyboard_set_mode(s_kb, LV_KEYBOARD_MODE_TEXT_LOWER);
     lv_obj_add_flag(s_kb, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_event_cb(s_kb, on_kb_event, LV_EVENT_READY,  NULL);
     lv_obj_add_event_cb(s_kb, on_kb_event, LV_EVENT_CANCEL, NULL);
+
+    s_delete_popup = lv_obj_create(s_screen);
+    lv_obj_set_size(s_delete_popup, 420, 170);
+    lv_obj_align(s_delete_popup, LV_ALIGN_CENTER, 0, -30);
+    lv_obj_set_style_bg_color(s_delete_popup, lv_color_hex(0x16213E), LV_PART_MAIN);
+    lv_obj_set_style_border_width(s_delete_popup, 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(s_delete_popup, 12, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(s_delete_popup, 16, LV_PART_MAIN);
+    lv_obj_clear_flag(s_delete_popup, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_delete_popup, LV_OBJ_FLAG_HIDDEN);
+
+    lv_obj_t *popup_title = lv_label_create(s_delete_popup);
+    lv_label_set_text(popup_title, LV_SYMBOL_WARNING "  Confirmation");
+    lv_obj_set_style_text_color(popup_title, lv_color_hex(0xF5C518), LV_PART_MAIN);
+    lv_obj_align(popup_title, LV_ALIGN_TOP_MID, 0, 0);
+
+    s_delete_popup_label = lv_label_create(s_delete_popup);
+    lv_obj_set_width(s_delete_popup_label, 360);
+    lv_obj_set_style_text_align(s_delete_popup_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_set_style_text_color(s_delete_popup_label, lv_color_hex(0xEAEAEA), LV_PART_MAIN);
+    lv_label_set_long_mode(s_delete_popup_label, LV_LABEL_LONG_WRAP);
+    lv_obj_align(s_delete_popup_label, LV_ALIGN_TOP_MID, 0, 42);
+
+    lv_obj_t *btn_cancel_delete = lv_btn_create(s_delete_popup);
+    lv_obj_set_size(btn_cancel_delete, 150, 42);
+    lv_obj_align(btn_cancel_delete, LV_ALIGN_BOTTOM_LEFT, 0, 0);
+    lv_obj_set_style_bg_color(btn_cancel_delete, lv_color_hex(0x444444), LV_PART_MAIN);
+    lv_obj_add_event_cb(btn_cancel_delete, on_delete_cancelled, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *lbl_cancel_delete = lv_label_create(btn_cancel_delete);
+    lv_label_set_text(lbl_cancel_delete, LV_SYMBOL_CLOSE "  Annuler");
+    lv_obj_center(lbl_cancel_delete);
+
+    lv_obj_t *btn_confirm_delete = lv_btn_create(s_delete_popup);
+    lv_obj_set_size(btn_confirm_delete, 150, 42);
+    lv_obj_align(btn_confirm_delete, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
+    lv_obj_set_style_bg_color(btn_confirm_delete, lv_color_hex(0xD50000), LV_PART_MAIN);
+    lv_obj_add_event_cb(btn_confirm_delete, on_delete_confirmed, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *lbl_confirm_delete = lv_label_create(btn_confirm_delete);
+    lv_label_set_text(lbl_confirm_delete, LV_SYMBOL_TRASH "  Supprimer");
+    lv_obj_center(lbl_confirm_delete);
 }
 
 lv_obj_t *scr_parameters_get(void) { return s_screen; }
@@ -524,5 +660,8 @@ void scr_parameters_refresh(void)
 
     lv_obj_add_flag(s_kb,        LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(s_cfg_panel, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_delete_popup, LV_OBJ_FLAG_HIDDEN);
+    s_pending_delete_uid = -1;
+    s_pending_delete_name[0] = '\0';
     lv_obj_clear_flag(s_pin_panel, LV_OBJ_FLAG_HIDDEN);
 }

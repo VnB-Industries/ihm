@@ -6,6 +6,30 @@
 static lv_obj_t *s_screen;
 static lv_obj_t *s_table;
 
+enum {
+    LEADERBOARD_COL_PLAYER = 0,
+    LEADERBOARD_COL_TOTAL,
+    LEADERBOARD_COL_BONUS,
+    LEADERBOARD_COL_MALUS,
+    LEADERBOARD_COL_GIVEN,
+    LEADERBOARD_COL_COUNT
+};
+
+static void leaderboard_apply_column_widths(void)
+{
+    lv_coord_t player_w = SCREEN_INNER_W * 28 / 100;
+    lv_coord_t total_w  = SCREEN_INNER_W * 14 / 100;
+    lv_coord_t bonus_w  = SCREEN_INNER_W * 10 / 100;
+    lv_coord_t malus_w  = SCREEN_INNER_W * 10 / 100;
+    lv_coord_t given_w  = SCREEN_INNER_W - player_w - total_w - bonus_w - malus_w;
+
+    lv_table_set_column_width(s_table, LEADERBOARD_COL_PLAYER, player_w);
+    lv_table_set_column_width(s_table, LEADERBOARD_COL_TOTAL, total_w);
+    lv_table_set_column_width(s_table, LEADERBOARD_COL_BONUS, bonus_w);
+    lv_table_set_column_width(s_table, LEADERBOARD_COL_MALUS, malus_w);
+    lv_table_set_column_width(s_table, LEADERBOARD_COL_GIVEN, given_w);
+}
+
 /* ── event callbacks ────────────────────────────────────────────────────── */
 
 static void on_back_clicked(lv_event_t *e)
@@ -19,6 +43,7 @@ static void on_back_clicked(lv_event_t *e)
 void scr_leaderboard_init(void)
 {
     s_screen = lv_obj_create(NULL);
+    lv_obj_set_size(s_screen, SCREEN_W, SCREEN_H);
     lv_obj_set_style_bg_color(s_screen, lv_color_hex(0x1A1A2E), LV_PART_MAIN);
 
     /* Title */
@@ -29,25 +54,21 @@ void scr_leaderboard_init(void)
 
     /* Table */
     s_table = lv_table_create(s_screen);
-    lv_obj_set_size(s_table, 760, 390);
+    lv_obj_set_size(s_table, SCREEN_INNER_W, SCREEN_INNER_H);
     lv_obj_align(s_table, LV_ALIGN_TOP_MID, 0, 52);
     lv_obj_set_style_bg_color(s_table, lv_color_hex(0x16213E), LV_PART_MAIN);
     lv_obj_set_style_text_color(s_table, lv_color_hex(0xEAEAEA), LV_PART_MAIN);
     lv_obj_set_style_border_color(s_table, lv_color_hex(0x0F3460), LV_PART_MAIN);
 
-    lv_table_set_column_count(s_table, 5);
-    lv_table_set_column_width(s_table, 0, 180); /* Joueur   */
-    lv_table_set_column_width(s_table, 1, 110); /* Total cL */
-    lv_table_set_column_width(s_table, 2,  80); /* Bonus    */
-    lv_table_set_column_width(s_table, 3,  80); /* Malus    */
-    lv_table_set_column_width(s_table, 4, 250); /* A donné  */
+    lv_table_set_column_count(s_table, LEADERBOARD_COL_COUNT);
+    leaderboard_apply_column_widths();
 
     /* Header row */
-    lv_table_set_cell_value(s_table, 0, 0, "Joueur");
-    lv_table_set_cell_value(s_table, 0, 1, "Total cL");
-    lv_table_set_cell_value(s_table, 0, 2, "Bonus");
-    lv_table_set_cell_value(s_table, 0, 3, "Malus");
-    lv_table_set_cell_value(s_table, 0, 4, "A donne a");
+    lv_table_set_cell_value(s_table, 0, LEADERBOARD_COL_PLAYER, "Joueur");
+    lv_table_set_cell_value(s_table, 0, LEADERBOARD_COL_TOTAL, "Total cL");
+    lv_table_set_cell_value(s_table, 0, LEADERBOARD_COL_BONUS, "Bonus");
+    lv_table_set_cell_value(s_table, 0, LEADERBOARD_COL_MALUS, "Malus");
+    lv_table_set_cell_value(s_table, 0, LEADERBOARD_COL_GIVEN, "Dernier Bonus/Malus");
 
     /* Back button */
     lv_obj_t *btn_back = lv_btn_create(s_screen);
@@ -83,16 +104,16 @@ void scr_leaderboard_refresh(void)
         uint32_t row = (uint32_t)(i + 1);
         char buf[64];
 
-        lv_table_set_cell_value(s_table, row, 0, users[i].name);
+        lv_table_set_cell_value(s_table, row, LEADERBOARD_COL_PLAYER, users[i].name);
 
         lv_snprintf(buf, sizeof(buf), "%d cL", users[i].total_cl);
-        lv_table_set_cell_value(s_table, row, 1, buf);
+        lv_table_set_cell_value(s_table, row, LEADERBOARD_COL_TOTAL, buf);
 
         lv_snprintf(buf, sizeof(buf), "+%d", users[i].bonus);
-        lv_table_set_cell_value(s_table, row, 2, buf);
+        lv_table_set_cell_value(s_table, row, LEADERBOARD_COL_BONUS, buf);
 
         lv_snprintf(buf, sizeof(buf), "+%d", users[i].malus);
-        lv_table_set_cell_value(s_table, row, 3, buf);
+        lv_table_set_cell_value(s_table, row, LEADERBOARD_COL_MALUS, buf);
 
         /* Given-modifier column */
         char given[80] = "-";
@@ -122,6 +143,6 @@ void scr_leaderboard_refresh(void)
                     type_str, target.name);
             }
         }
-        lv_table_set_cell_value(s_table, row, 4, given);
+        lv_table_set_cell_value(s_table, row, LEADERBOARD_COL_GIVEN, given);
     }
 }

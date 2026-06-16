@@ -17,11 +17,15 @@ typedef struct {
     bool            spinning;
     lv_coord_t      radius;
     wf_result_cb_t  result_cb;
+    wf_spin_request_cb_t spin_request_cb;
 } wf_priv_t;
 
 /* ── forward declarations ───────────────────────────────────────────────── */
 
 static void wf_redraw(wf_priv_t *p);
+static void wf_touch_event_cb(lv_event_t *e);
+
+#define WF_SWIPE_TRIGGER_PX  12
 
 /* ── drawing helpers ────────────────────────────────────────────────────── */
 
@@ -101,7 +105,7 @@ static void wf_redraw(wf_priv_t *p)
         lv_draw_line(&layer, &line_dsc);
     }
 
-    /* --- segment labels (placed at 65 % radius, segment midpoint) --- */
+    /* --- segment labels/icons (placed at 65 % radius, segment midpoint) --- */
     lv_draw_label_dsc_t lbl_dsc;
     lv_draw_label_dsc_init(&lbl_dsc);
     lbl_dsc.color = lv_color_white();
@@ -115,9 +119,31 @@ static void wf_redraw(wf_priv_t *p)
         lv_coord_t lr = (lv_coord_t)(r * 65 / 100);
         lv_coord_t lx = wf_x(cx, lr, d);
         lv_coord_t ly = wf_y(cy, lr, d);
+
+        if(p->segs[i].image_src != NULL) {
+            lv_image_header_t header;
+            if(lv_image_decoder_get_info(p->segs[i].image_src, &header) == LV_RESULT_OK) {
+                lv_draw_image_dsc_t img_dsc;
+                lv_draw_image_dsc_init(&img_dsc);
+                img_dsc.src = p->segs[i].image_src;
+                img_dsc.opa = LV_OPA_COVER;
+
+                lv_coord_t half_w = (lv_coord_t)(header.w / 2);
+                lv_coord_t half_h = (lv_coord_t)(header.h / 2);
+                lv_area_t img_area = {
+                    (int32_t)(lx - half_w),
+                    (int32_t)(ly - half_h),
+                    (int32_t)(lx - half_w + (lv_coord_t)header.w - 1),
+                    (int32_t)(ly - half_h + (lv_coord_t)header.h - 1)
+                };
+                lv_draw_image(&layer, &img_dsc, &img_area);
+                continue;
+            }
+        }
+
         lbl_dsc.text = p->segs[i].label;
-        lv_area_t a = { (int32_t)(lx - 16), (int32_t)(ly - 8),
-                        (int32_t)(lx + 15), (int32_t)(ly + 7) };
+        lv_area_t a = { (int32_t)(lx - 22), (int32_t)(ly - 12),
+                        (int32_t)(lx + 21), (int32_t)(ly + 11) };
         lv_draw_label(&layer, &lbl_dsc, &a);
     }
 
@@ -175,6 +201,32 @@ static void wf_anim_ready_cb(lv_anim_t *a)
     p->result_cb(container, result_idx, &p->segs[result_idx]);
 }
 
+static void wf_touch_event_cb(lv_event_t *e)
+{
+    if(lv_event_get_code(e) != LV_EVENT_RELEASED) {
+        return;
+    }
+
+    lv_obj_t *wf = lv_event_get_current_target(e);
+    wf_priv_t *p = (wf_priv_t *)lv_obj_get_user_data(wf);
+    if(!p || p->spinning || !p->spin_request_cb || p->seg_count == 0) {
+        return;
+    }
+
+    lv_indev_t *indev = lv_event_get_indev(e);
+    if(indev == NULL) {
+        return;
+    }
+
+    lv_point_t vect;
+    lv_indev_get_vect(indev, &vect);
+    if(LV_ABS(vect.x) < WF_SWIPE_TRIGGER_PX && LV_ABS(vect.y) < WF_SWIPE_TRIGGER_PX) {
+        return;
+    }
+
+    p->spin_request_cb(wf, (uint16_t)(LV_ABS(vect.x) + LV_ABS(vect.y)));
+}
+
 /* ── public API ─────────────────────────────────────────────────────────── */
 
 lv_obj_t *wheel_fortune_create(lv_obj_t *parent, lv_coord_t radius)
@@ -187,12 +239,15 @@ lv_obj_t *wheel_fortune_create(lv_obj_t *parent, lv_coord_t radius)
     lv_obj_set_style_bg_opa(cont, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_border_width(cont, 0, LV_PART_MAIN);
     lv_obj_set_style_pad_all(cont, 0, LV_PART_MAIN);
+    lv_obj_clear_flag(cont, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(cont, wf_touch_event_cb, LV_EVENT_RELEASED, NULL);
 
     /* Pointer triangle at the top center */
     lv_obj_t *ptr = lv_label_create(cont);
     lv_label_set_text(ptr, LV_SYMBOL_DOWN);
     lv_obj_set_style_text_color(ptr, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
     lv_obj_align(ptr, LV_ALIGN_TOP_MID, 0, 0);
+    lv_obj_add_flag(ptr, LV_OBJ_FLAG_EVENT_BUBBLE);
 
     /* Canvas for the spinning wheel */
     lv_draw_buf_t *draw_buf = lv_draw_buf_create(size, size,
@@ -205,6 +260,7 @@ lv_obj_t *wheel_fortune_create(lv_obj_t *parent, lv_coord_t radius)
     lv_obj_t *canvas = lv_canvas_create(cont);
     lv_canvas_set_draw_buf(canvas, draw_buf);
     lv_obj_align(canvas, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_add_flag(canvas, LV_OBJ_FLAG_EVENT_BUBBLE);
 
     /* Private data */
     wf_priv_t *priv = (wf_priv_t *)lv_malloc(sizeof(wf_priv_t));
@@ -243,11 +299,21 @@ void wheel_fortune_set_result_cb(lv_obj_t *wf, wf_result_cb_t cb)
     if (p) p->result_cb = cb;
 }
 
-void wheel_fortune_spin(lv_obj_t *wf, uint32_t duration_ms,
-                        uint16_t result_seg)
+void wheel_fortune_set_spin_request_cb(lv_obj_t *wf, wf_spin_request_cb_t cb)
+{
+    wf_priv_t *p = (wf_priv_t *)lv_obj_get_user_data(wf);
+    if (p) p->spin_request_cb = cb;
+}
+
+void wheel_fortune_spin_ex(lv_obj_t *wf, uint32_t duration_ms,
+                           uint16_t result_seg, uint16_t full_turns)
 {
     wf_priv_t *p = (wf_priv_t *)lv_obj_get_user_data(wf);
     if (!p || p->spinning || p->seg_count == 0) return;
+
+    if(full_turns == 0) {
+        full_turns = 1;
+    }
 
     int32_t seg_angle = 360 / p->seg_count;
 
@@ -264,7 +330,7 @@ void wheel_fortune_spin(lv_obj_t *wf, uint32_t duration_ms,
 
     int32_t cur   = ((p->rotation % 360) + 360) % 360;
     int32_t delta = ((target_rot - cur) + 360) % 360;
-    int32_t end   = p->rotation + 5 * 360 + delta; /* 5 full spins + landing */
+    int32_t end   = p->rotation + (int32_t)full_turns * 360 + delta;
 
     p->spinning = true;
 
@@ -277,6 +343,12 @@ void wheel_fortune_spin(lv_obj_t *wf, uint32_t duration_ms,
     lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
     lv_anim_set_ready_cb(&a, wf_anim_ready_cb);
     lv_anim_start(&a);
+}
+
+void wheel_fortune_spin(lv_obj_t *wf, uint32_t duration_ms,
+                        uint16_t result_seg)
+{
+    wheel_fortune_spin_ex(wf, duration_ms, result_seg, 5);
 }
 
 bool wheel_fortune_is_spinning(lv_obj_t *wf)

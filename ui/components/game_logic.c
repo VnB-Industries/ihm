@@ -38,6 +38,7 @@ void game_compute_wheel_segments(const user_record_t *u,
         lv_snprintf(s_seg_labels[i], sizeof(s_seg_labels[i]),
                     "%dcL", val);
         segs[i].label = s_seg_labels[i];
+        segs[i].image_src = NULL;
         segs[i].color = k_seg_colors[i];
         segs[i].value = (uint32_t)val;
     }
@@ -45,6 +46,16 @@ void game_compute_wheel_segments(const user_record_t *u,
 }
 
 /* ── bonus wheel ────────────────────────────────────────────────────────── */
+
+static const char *k_bonus_icon_bonus          = LV_SYMBOL_OK;
+static const char *k_bonus_icon_nothing        = LV_SYMBOL_CLOSE;
+static const char *k_bonus_icon_malus          = LV_SYMBOL_WARNING;
+static const char *k_bonus_icon_timeout_add    = LV_SYMBOL_PAUSE;
+static const char *k_bonus_icon_timeout_remove = LV_SYMBOL_PLAY;
+static const char *k_bonus_img_bonus           = "A:images/verreBonus.png";
+static const char *k_bonus_img_malus           = "A:images/verreMalus.png";
+static const char *k_bonus_img_timeout_add     = "A:images/timeMalus.png";
+static const char *k_bonus_img_timeout_remove  = "A:images/timeBonus.png";
 
 void game_compute_bonus_segments(wf_segment_t *segs, uint8_t *count)
 {
@@ -62,36 +73,41 @@ void game_compute_bonus_segments(wf_segment_t *segs, uint8_t *count)
 
     uint8_t n = 0;
     for (int i = 0; i < wb && n < WHEEL_FORTUNE_MAX_SEGMENTS; i++, n++) {
-        segs[n].label = "BONUS";
+        segs[n].label = k_bonus_icon_bonus;
+        segs[n].image_src = k_bonus_img_bonus;
         segs[n].color = lv_color_hex(0x00C853);
         segs[n].value = BONUS_WHEEL_VAL_BONUS;
     }
     for (int i = 0; i < wn && n < WHEEL_FORTUNE_MAX_SEGMENTS; i++, n++) {
-        segs[n].label = "RIEN";
+        segs[n].label = k_bonus_icon_nothing;
+        segs[n].image_src = NULL;
         segs[n].color = lv_color_hex(0x616161);
         segs[n].value = BONUS_WHEEL_VAL_NOTHING;
     }
     for (int i = 0; i < wm && n < WHEEL_FORTUNE_MAX_SEGMENTS; i++, n++) {
-        segs[n].label = "MALUS";
+        segs[n].label = k_bonus_icon_malus;
+        segs[n].image_src = k_bonus_img_malus;
         segs[n].color = lv_color_hex(0xD50000);
         segs[n].value = BONUS_WHEEL_VAL_MALUS;
     }
     for (int i = 0; i < wta && n < WHEEL_FORTUNE_MAX_SEGMENTS; i++, n++) {
-        segs[n].label = "+TEMPS";
+        segs[n].label = k_bonus_icon_timeout_add;
+        segs[n].image_src = k_bonus_img_timeout_add;
         segs[n].color = lv_color_hex(0xFF6D00); /* deep orange - add time = bad */
         segs[n].value = BONUS_WHEEL_VAL_TIMEOUT_ADD;
     }
     for (int i = 0; i < wtr && n < WHEEL_FORTUNE_MAX_SEGMENTS; i++, n++) {
-        segs[n].label = "-TEMPS";
+        segs[n].label = k_bonus_icon_timeout_remove;
+        segs[n].image_src = k_bonus_img_timeout_remove;
         segs[n].color = lv_color_hex(0x0091EA); /* light blue - remove time = good */
         segs[n].value = BONUS_WHEEL_VAL_TIMEOUT_REMOVE;
     }
 
     /* Fallback: one of each if all weights are 0 */
     if (n == 0) {
-        segs[0].label = "BONUS"; segs[0].color = lv_color_hex(0x00C853); segs[0].value = BONUS_WHEEL_VAL_BONUS;
-        segs[1].label = "RIEN";  segs[1].color = lv_color_hex(0x616161); segs[1].value = BONUS_WHEEL_VAL_NOTHING;
-        segs[2].label = "MALUS"; segs[2].color = lv_color_hex(0xD50000); segs[2].value = BONUS_WHEEL_VAL_MALUS;
+        segs[0].label = k_bonus_icon_bonus;   segs[0].image_src = k_bonus_img_bonus; segs[0].color = lv_color_hex(0x00C853); segs[0].value = BONUS_WHEEL_VAL_BONUS;
+        segs[1].label = k_bonus_icon_nothing; segs[1].image_src = NULL;              segs[1].color = lv_color_hex(0x616161); segs[1].value = BONUS_WHEEL_VAL_NOTHING;
+        segs[2].label = k_bonus_icon_malus;   segs[2].image_src = k_bonus_img_malus; segs[2].color = lv_color_hex(0xD50000); segs[2].value = BONUS_WHEEL_VAL_MALUS;
         n = 3;
     }
     *count = n;
@@ -152,6 +168,12 @@ void game_apply_modifier(int giver_id, int target_id, modifier_type_t type)
     int max_bonus = db_get_config("max_bonus_stack", 5);
     int max_malus = db_get_config("max_malus_stack", 5);
     int timeout_s = db_get_config("timeout_modifier_minutes", 5) * 60;
+
+    /* Fake target (e.g. "Personne"): keep history on giver, apply to nobody. */
+    if (target_id <= 0) {
+        db_update_user(&giver);
+        return;
+    }
 
     /* Helper lambda-equivalent: apply effect to a user_record_t */
 #define APPLY_MOD(rec) \

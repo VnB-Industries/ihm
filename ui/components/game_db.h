@@ -55,6 +55,12 @@ int  db_delete_user(int id);
 int  db_get_config(const char *key, int default_val);
 int  db_set_config(const char *key, int value);
 
+/* ── text config key-value ─────────────────────────────────────────────── */
+
+int  db_get_text_config(const char *key, char *out, int out_size,
+                        const char *default_val);
+int  db_set_text_config(const char *key, const char *value);
+
 #ifdef __cplusplus
 }
 #endif

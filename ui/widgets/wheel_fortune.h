@@ -11,6 +11,7 @@ extern "C" {
 
 typedef struct {
     const char *label;
+    const void *image_src;
     lv_color_t  color;
     uint32_t    value;
 } wf_segment_t;
@@ -23,6 +24,13 @@ typedef struct {
  */
 typedef void (*wf_result_cb_t)(lv_obj_t *wf, uint16_t seg_index,
                                const wf_segment_t *seg);
+
+/**
+ * Callback fired when the user requests a spin by swiping the wheel.
+ * @param wf              the wheel container object
+ * @param swipe_strength  gesture magnitude in pixels
+ */
+typedef void (*wf_spin_request_cb_t)(lv_obj_t *wf, uint16_t swipe_strength);
 
 /**
  * Create a wheel-of-fortune widget.
@@ -38,6 +46,19 @@ void wheel_fortune_set_segments(lv_obj_t *wf, const wf_segment_t *segs,
 
 /** Register a callback invoked when spinning finishes. */
 void wheel_fortune_set_result_cb(lv_obj_t *wf, wf_result_cb_t cb);
+
+/** Register a callback invoked when the user swipes the wheel to spin it. */
+void wheel_fortune_set_spin_request_cb(lv_obj_t *wf, wf_spin_request_cb_t cb);
+
+/**
+ * Start the spin animation with an explicit number of full turns.
+ * @param wf           wheel object
+ * @param duration_ms  total animation duration in milliseconds
+ * @param result_seg   index of the segment that should win (0-based)
+ * @param full_turns   number of complete turns before landing
+ */
+void wheel_fortune_spin_ex(lv_obj_t *wf, uint32_t duration_ms,
+                           uint16_t result_seg, uint16_t full_turns);
 
 /**
  * Start the spin animation.
