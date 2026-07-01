@@ -3,6 +3,7 @@
 #include "wheel_fortune.h"
 #include "game_logic.h"
 #include "game_db.h"
+#include "serial_comm.h"
 #include <time.h>
 #include <stdio.h>
 #if LV_USE_LOTTIE
@@ -174,6 +175,8 @@ static void on_wheel_result(lv_obj_t *wf, uint16_t seg_index,
 #endif
 
     int cl = (int)seg->value;
+    (void)serial_comm_send_dispense_cl(cl);
+
     char buf[48];
     lv_snprintf(buf, sizeof(buf),
                 cl == 0 ? "Chance ! 0 cL"

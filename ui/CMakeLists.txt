@@ -22,6 +22,8 @@ set(IHM_DB_PATH "./game.db" CACHE STRING "Runtime path to the SQLite database")
 set(IHM_FBDEV_DEVICE "/dev/fb0" CACHE STRING "Framebuffer device path")
 set(IHM_EVDEV_DEVICE "/dev/input/event0" CACHE STRING "Input event device path")
 set(IHM_DRM_DEVICE "/dev/dri/card0" CACHE STRING "DRM card device path")
+set(IHM_SERIAL_DEVICE "/dev/ttyACM0" CACHE STRING "USB serial device path to microcontroller")
+set(IHM_SERIAL_BAUD 9600 CACHE STRING "USB serial baud rate")
 set(IHM_SCREEN_WIDTH 1024 CACHE STRING "Logical UI width")
 set(IHM_SCREEN_HEIGHT 600 CACHE STRING "Logical UI height")
 
@@ -155,6 +157,8 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE
     IHM_FBDEV_DEVICE=\"${IHM_FBDEV_DEVICE}\"
     IHM_EVDEV_DEVICE=\"${IHM_EVDEV_DEVICE}\"
     IHM_DRM_DEVICE=\"${IHM_DRM_DEVICE}\"
+    IHM_SERIAL_DEVICE=\"${IHM_SERIAL_DEVICE}\"
+    IHM_SERIAL_BAUD=${IHM_SERIAL_BAUD}
     IHM_LV_USE_SDL=0
     IHM_LV_USE_LINUX_FBDEV=$<BOOL:${IHM_USE_LINUX_FBDEV}>
     IHM_LV_USE_LINUX_DRM=$<BOOL:${IHM_USE_LINUX_DRM}>

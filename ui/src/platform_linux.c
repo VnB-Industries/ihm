@@ -1,9 +1,12 @@
 #include "platform_linux.h"
 
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
+#include <linux/kd.h>
 
 #include "lvgl/lvgl.h"
 #include "lvgl/drivers/display/lv_linux_fbdev.h"
@@ -22,11 +25,61 @@
 #define IHM_DRM_DEVICE "/dev/dri/card0"
 #endif
 
+static int s_console_tty_fd = -1;
+static bool s_console_graphics_mode = false;
+
+static void terminal_set_cursor_visible(bool visible)
+{
+    const char *seq = visible ? "\x1b[?25h" : "\x1b[?25l";
+    size_t len = strlen(seq);
+
+    int tty_fd = open("/dev/tty", O_WRONLY | O_NOCTTY);
+    if(tty_fd >= 0) {
+        (void)write(tty_fd, seq, len);
+        close(tty_fd);
+    }
+
+    if(isatty(STDOUT_FILENO)) {
+        (void)write(STDOUT_FILENO, seq, len);
+    }
+}
+
+static void console_set_graphics_mode(void)
+{
+    if(s_console_tty_fd >= 0) {
+        return;
+    }
+
+    s_console_tty_fd = open("/dev/tty", O_RDWR | O_NOCTTY);
+    if(s_console_tty_fd < 0) {
+        return;
+    }
+
+    if(ioctl(s_console_tty_fd, KDSETMODE, KD_GRAPHICS) == 0) {
+        s_console_graphics_mode = true;
+    }
+}
+
+static void restore_terminal_cursor(void)
+{
+    terminal_set_cursor_visible(true);
+
+    if(s_console_tty_fd >= 0) {
+        if(s_console_graphics_mode) {
+            (void)ioctl(s_console_tty_fd, KDSETMODE, KD_TEXT);
+        }
+        close(s_console_tty_fd);
+        s_console_tty_fd = -1;
+        s_console_graphics_mode = false;
+    }
+}
+
 bool platform_linux_init(void)
 {
-    /* Hide the terminal cursor for exclusive screen control */
-    system("stty -echo -icanon"); /* Disable echo and canonical mode */
-    system("setterm -cursor off"); /* Hide cursor via terminfo */
+    /* Hide cursor while the app owns the screen. */
+   // terminal_set_cursor_visible(false);
+    //console_set_graphics_mode();
+    //atexit(restore_terminal_cursor);
 
     lv_display_t *disp = NULL;
 
