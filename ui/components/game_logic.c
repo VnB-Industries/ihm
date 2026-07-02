@@ -131,6 +131,7 @@ bool game_on_basic_spin(int user_id, int cl_value)
     }
 
     db_update_user(&u);
+    db_add_cl_history(u.id, u.last_spin_epoch, u.total_cl);
     return triggered;
 }
 

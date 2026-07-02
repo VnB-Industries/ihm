@@ -447,9 +447,12 @@ void scr_parameters_init(void)
 
     /* Back button on PIN screen */
     lv_obj_t *btn_pin_back = lv_btn_create(s_pin_panel);
-    lv_obj_set_size(btn_pin_back, 160, 46);
-    lv_obj_align(btn_pin_back, LV_ALIGN_BOTTOM_RIGHT, -20, -14);
+    lv_obj_set_size(btn_pin_back, 130, 40);
+    lv_obj_align(btn_pin_back, LV_ALIGN_BOTTOM_RIGHT, -20, -10);
     lv_obj_set_style_bg_color(btn_pin_back, lv_color_hex(0x444444), LV_PART_MAIN);
+    lv_obj_set_style_radius(btn_pin_back, 8, LV_PART_MAIN);
+    lv_obj_set_style_pad_left(btn_pin_back, 10, LV_PART_MAIN);
+    lv_obj_set_style_pad_right(btn_pin_back, 10, LV_PART_MAIN);
     lv_obj_add_event_cb(btn_pin_back, on_back_clicked, LV_EVENT_CLICKED, NULL);
     lv_obj_t *lbl_pin_back = lv_label_create(btn_pin_back);
     lv_label_set_text(lbl_pin_back, LV_SYMBOL_LEFT "  Retour");
@@ -579,17 +582,9 @@ void scr_parameters_init(void)
     lv_obj_set_style_border_width(btn_row, 0, LV_PART_MAIN);
     lv_obj_set_style_pad_all(btn_row, 0, LV_PART_MAIN);
     lv_obj_set_flex_flow(btn_row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(btn_row, LV_FLEX_ALIGN_SPACE_BETWEEN,
+    lv_obj_set_flex_align(btn_row, LV_FLEX_ALIGN_END,
                           LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_clear_flag(btn_row, LV_OBJ_FLAG_SCROLLABLE);
-
-    lv_obj_t *btn_back = lv_btn_create(btn_row);
-    lv_obj_set_size(btn_back, 160, 42);
-    lv_obj_set_style_bg_color(btn_back, lv_color_hex(0x444444), LV_PART_MAIN);
-    lv_obj_add_event_cb(btn_back, on_back_clicked, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *lbl_back = lv_label_create(btn_back);
-    lv_label_set_text(lbl_back, LV_SYMBOL_LEFT "  Retour");
-    lv_obj_center(lbl_back);
 
     lv_obj_t *btn_save = lv_btn_create(btn_row);
     lv_obj_set_size(btn_save, 160, 42);
@@ -598,6 +593,14 @@ void scr_parameters_init(void)
     lv_obj_t *lbl_save = lv_label_create(btn_save);
     lv_label_set_text(lbl_save, LV_SYMBOL_SAVE "  Sauvegarder");
     lv_obj_center(lbl_save);
+
+    lv_obj_t *btn_back = lv_btn_create(btn_row);
+    lv_obj_set_size(btn_back, 160, 42);
+    lv_obj_set_style_bg_color(btn_back, lv_color_hex(0x444444), LV_PART_MAIN);
+    lv_obj_add_event_cb(btn_back, on_back_clicked, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *lbl_back = lv_label_create(btn_back);
+    lv_label_set_text(lbl_back, LV_SYMBOL_LEFT "  Retour");
+    lv_obj_center(lbl_back);
 
     /* Keyboard — overlay at bottom, hidden by default */
     s_kb = lv_keyboard_create(s_screen);

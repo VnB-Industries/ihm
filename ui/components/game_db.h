@@ -50,6 +50,21 @@ int  db_update_user(const user_record_t *u);
 /** Delete a user by id.  Returns 0 on success. */
 int  db_delete_user(int id);
 
+/* ── cL history (for evolution graph) ─────────────────────────────────── */
+
+typedef struct {
+    int64_t epoch;      /* Unix timestamp when this total_cl was recorded */
+    int     total_cl;   /* cumulative cL at that point in time            */
+} cl_history_point_t;
+
+/** Append a history point for @p user_id.  Returns 0 on success, -1 on error. */
+int  db_add_cl_history(int user_id, int64_t epoch, int total_cl);
+
+/** Fill @p buf with up to @p max_count history points for @p user_id,
+ *  ordered by epoch ascending (oldest first).
+ *  Returns number of rows written. */
+int  db_get_cl_history(int user_id, cl_history_point_t *buf, int max_count);
+
 /* ── config key-value ──────────────────────────────────────────────────── */
 
 int  db_get_config(const char *key, int default_val);

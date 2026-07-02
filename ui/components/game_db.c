@@ -66,6 +66,20 @@ int db_init(const char *path)
     );
 
     exec_sql(
+        "CREATE TABLE IF NOT EXISTS cl_history ("
+        "  id       INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  user_id  INTEGER NOT NULL,"
+        "  epoch    INTEGER NOT NULL,"
+        "  total_cl INTEGER NOT NULL,"
+        "  FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE"
+        ");"
+    );
+    exec_sql(
+        "CREATE INDEX IF NOT EXISTS idx_cl_history_user_epoch"
+        " ON cl_history(user_id, epoch);"
+    );
+
+    exec_sql(
         "CREATE TABLE IF NOT EXISTS game_config ("
         "  key   TEXT    PRIMARY KEY,"
         "  value INTEGER NOT NULL DEFAULT 0"
@@ -204,6 +218,44 @@ int db_delete_user(int id)
     int rc = (sqlite3_step(stmt) == SQLITE_DONE) ? 0 : -1;
     sqlite3_finalize(stmt);
     return rc;
+}
+
+int db_add_cl_history(int user_id, int64_t epoch, int total_cl)
+{
+    if (!s_db) return -1;
+
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(s_db,
+            "INSERT INTO cl_history (user_id, epoch, total_cl) VALUES (?,?,?);",
+            -1, &stmt, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_int  (stmt, 1, user_id);
+    sqlite3_bind_int64(stmt, 2, epoch);
+    sqlite3_bind_int  (stmt, 3, total_cl);
+
+    int rc = (sqlite3_step(stmt) == SQLITE_DONE) ? 0 : -1;
+    sqlite3_finalize(stmt);
+    return rc;
+}
+
+int db_get_cl_history(int user_id, cl_history_point_t *buf, int max_count)
+{
+    if (!s_db || !buf || max_count <= 0) return 0;
+
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(s_db,
+            "SELECT epoch, total_cl FROM cl_history"
+            " WHERE user_id = ? ORDER BY epoch ASC;",
+            -1, &stmt, NULL) != SQLITE_OK) return 0;
+    sqlite3_bind_int(stmt, 1, user_id);
+
+    int n = 0;
+    while (sqlite3_step(stmt) == SQLITE_ROW && n < max_count) {
+        buf[n].epoch    = sqlite3_column_int64(stmt, 0);
+        buf[n].total_cl = sqlite3_column_int(stmt, 1);
+        n++;
+    }
+    sqlite3_finalize(stmt);
+    return n;
 }
 
 int db_get_config(const char *key, int default_val)

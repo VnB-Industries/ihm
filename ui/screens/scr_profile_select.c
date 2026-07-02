@@ -114,9 +114,12 @@ void scr_profile_select_init(void)
 
     /* Back button */
     lv_obj_t *btn_back = lv_btn_create(s_screen);
-    lv_obj_set_size(btn_back, 160, 46);
-    lv_obj_align(btn_back, LV_ALIGN_BOTTOM_RIGHT, -20, -8);
+    lv_obj_set_size(btn_back, 130, 40);
+    lv_obj_align(btn_back, LV_ALIGN_BOTTOM_RIGHT, -20, -10);
     lv_obj_set_style_bg_color(btn_back, lv_color_hex(0x444444), LV_PART_MAIN);
+    lv_obj_set_style_radius(btn_back, 8, LV_PART_MAIN);
+    lv_obj_set_style_pad_left(btn_back, 10, LV_PART_MAIN);
+    lv_obj_set_style_pad_right(btn_back, 10, LV_PART_MAIN);
     lv_obj_add_event_cb(btn_back, on_back_clicked, LV_EVENT_CLICKED, NULL);
     lv_obj_t *lbl_back = lv_label_create(btn_back);
     lv_label_set_text(lbl_back, LV_SYMBOL_LEFT "  Retour");
