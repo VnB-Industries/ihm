@@ -138,6 +138,13 @@ bool serial_comm_send_dispense_cl(int pump1_cl, int pump2_cl)
         return false;
     }
 
+    /* Discard any unread bytes (stale PROGRESS / OK / ERROR replies from
+     * previous dispenses) before issuing a new command.  If this data is left
+     * in the kernel receive buffer, it eventually fills up and Arduino's
+     * Serial.print() blocks, stalling loop() and causing 2-5 s dispensing lag
+     * after several uses. */
+    tcflush(s_serial_fd, TCIFLUSH);
+
     char command[64];
     int n = snprintf(command, sizeof(command), "DISPENSE:%d:%d\n", pump1_cl, pump2_cl);
     if (n < 0 || n >= (int)sizeof(command)) {
