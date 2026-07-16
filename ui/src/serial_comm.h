@@ -13,8 +13,11 @@ bool serial_comm_init(void);
 /* Close the serial link if currently open. */
 void serial_comm_deinit(void);
 
-/* Send command DISPENSE:[QUANTITY] where QUANTITY is in cL. */
-bool serial_comm_send_dispense_cl(int quantity_cl);
+/* Send command DISPENSE:[PUMP1_CL]:[PUMP2_CL] where quantities are in cL. */
+bool serial_comm_send_dispense_cl(int pump1_cl, int pump2_cl);
+
+/* Send STOP command to immediately abort an in-progress dispense. */
+bool serial_comm_send_stop(void);
 
 #ifdef __cplusplus
 }
