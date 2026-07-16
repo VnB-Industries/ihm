@@ -19,6 +19,12 @@ bool serial_comm_send_dispense_cl(int pump1_cl, int pump2_cl);
 /* Send STOP command to immediately abort an in-progress dispense. */
 bool serial_comm_send_stop(void);
 
+/* Non-blocking RFID tag poll.
+ * Returns true and fills tag_out with a NUL-terminated uppercase hex UID
+ * when the Arduino has sent a complete "RFID:<uid>\n" line.
+ * Returns false when no RFID line is available. */
+bool serial_comm_read_rfid(char *tag_out, size_t tag_len);
+
 #ifdef __cplusplus
 }
 #endif

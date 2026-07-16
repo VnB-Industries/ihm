@@ -1,4 +1,7 @@
 #include "screen_manager.h"
+#include "serial_comm.h"
+#include "game_logic.h"
+#include "game_db.h"
 #include "scr_home.h"
 #include "scr_profile_select.h"
 #include "scr_glass_select.h"
@@ -37,6 +40,13 @@ static screen_id_t s_current = SCREEN_COUNT;
 
 static uint32_t s_last_touch_ms = 0;
 static lv_timer_t *s_inactivity_timer = NULL;
+
+/* ── RFID dispatch ────────────────────────────────────────────────── */
+
+static int        s_enroll_uid      = -1;
+static uint32_t   s_enroll_deadline = 0;
+static void     (*s_enroll_cb)(rfid_enroll_result_t) = NULL;
+static lv_timer_t *s_rfid_timer = NULL;
 
 static void inactivity_reset(void)
 {
@@ -81,6 +91,53 @@ static void inactivity_timer_cb(lv_timer_t *t)
     }
 }
 
+static void rfid_tick(lv_timer_t *t)
+{
+    (void)t;
+
+    char tag[32];
+    bool got_tag = serial_comm_read_rfid(tag, sizeof(tag));
+
+    /* ── Enrollment mode ── */
+    if (s_enroll_uid >= 0) {
+        if (lv_tick_get() >= s_enroll_deadline) {
+            void (*cb)(rfid_enroll_result_t) = s_enroll_cb;
+            s_enroll_uid = -1;
+            s_enroll_cb  = NULL;
+            if (cb) cb(RFID_ENROLL_TIMEOUT);
+            return;
+        }
+        if (!got_tag) return;
+
+        user_record_t existing;
+        if (db_get_user_by_rfid(tag, &existing) == 0 &&
+                existing.id != s_enroll_uid) {
+            void (*cb)(rfid_enroll_result_t) = s_enroll_cb;
+            s_enroll_uid = -1;
+            s_enroll_cb  = NULL;
+            if (cb) cb(RFID_ENROLL_TAKEN);
+            return;
+        }
+
+        db_set_user_rfid(s_enroll_uid, tag);
+        void (*cb)(rfid_enroll_result_t) = s_enroll_cb;
+        s_enroll_uid = -1;
+        s_enroll_cb  = NULL;
+        if (cb) cb(RFID_ENROLL_OK);
+        return;
+    }
+
+    /* ── Normal dispatch ── */
+    if (!got_tag) return;
+    if (s_current == SCREEN_PARAMETERS) return;   /* admin screen — ignore */
+
+    user_record_t u;
+    if (db_get_user_by_rfid(tag, &u) != 0) return;  /* unknown tag */
+
+    game_set_active_user(u.id);
+    screen_manager_load(SCREEN_GLASS_SELECT);
+}
+
 /* ── public API ─────────────────────────────────────────────────────────── */
 
 void screen_manager_init(void)
@@ -99,6 +156,7 @@ void screen_manager_init(void)
     register_input_activity_hooks();
     s_inactivity_timer = lv_timer_create(inactivity_timer_cb,
                                          IHM_INACTIVITY_POLL_MS, NULL);
+    s_rfid_timer = lv_timer_create(rfid_tick, 150, NULL);
 }
 
 void screen_manager_load(screen_id_t id)
@@ -125,3 +183,16 @@ screen_id_t screen_manager_current(void)
     return s_current;
 }
 
+void screen_manager_rfid_enroll_start(int user_id, uint32_t timeout_ms,
+                                      void (*cb)(rfid_enroll_result_t))
+{
+    s_enroll_uid      = user_id;
+    s_enroll_deadline = lv_tick_get() + timeout_ms;
+    s_enroll_cb       = cb;
+}
+
+void screen_manager_rfid_enroll_cancel(void)
+{
+    s_enroll_uid = -1;
+    s_enroll_cb  = NULL;
+}

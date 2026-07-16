@@ -21,6 +21,7 @@ typedef struct {
     int     given_modifier;    /* +1 = gave bonus, -1 = gave malus, 0 = none */
     int     given_to_id;       /* user-id of recipient, -1 = none           */
     int64_t last_spin_epoch;   /* Unix timestamp of last basic spin         */
+    char    rfid_tag[32];      /* linked RFID UID hex string, or "" if none */
 } user_record_t;
 
 /**
@@ -49,6 +50,13 @@ int  db_update_user(const user_record_t *u);
 
 /** Delete a user by id.  Returns 0 on success. */
 int  db_delete_user(int id);
+
+/** Look up a user by RFID tag hex string.  Returns 0 on success, -1 if not found. */
+int  db_get_user_by_rfid(const char *tag, user_record_t *out);
+
+/** Set or clear the RFID tag for user @p user_id.
+ *  Pass NULL or "" to unlink.  Returns 0 on success. */
+int  db_set_user_rfid(int user_id, const char *tag);
 
 /* ── cL history (for evolution graph) ─────────────────────────────────── */
 

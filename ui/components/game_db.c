@@ -37,11 +37,14 @@ static void fill_user(sqlite3_stmt *stmt, user_record_t *u)
     u->given_modifier = sqlite3_column_int(stmt, 6);
     u->given_to_id    = sqlite3_column_int(stmt, 7);
     u->last_spin_epoch = sqlite3_column_int64(stmt, 8);
+    const char *tag = (const char *)sqlite3_column_text(stmt, 9);
+    strncpy(u->rfid_tag, tag ? tag : "", sizeof(u->rfid_tag) - 1);
+    u->rfid_tag[sizeof(u->rfid_tag) - 1] = '\0';
 }
 
 static const char k_user_select[] =
     "SELECT id, name, bonus, malus, wheel_trigger, total_cl,"
-    "       given_modifier, given_to_id, last_spin_epoch FROM users";
+    "       given_modifier, given_to_id, last_spin_epoch, rfid_tag FROM users";
 
 /* ── public API ─────────────────────────────────────────────────────────── */
 
@@ -120,6 +123,11 @@ int db_init(const char *path)
     exec_sql_quiet(
         "ALTER TABLE users ADD COLUMN"
         " last_spin_epoch INTEGER NOT NULL DEFAULT 0;"
+    );
+
+    /* Schema migration: add rfid_tag column if not present yet. */
+    exec_sql_quiet(
+        "ALTER TABLE users ADD COLUMN rfid_tag TEXT;"
     );
 
     return 0;
@@ -336,6 +344,43 @@ int db_set_text_config(const char *key, const char *value)
     if (sqlite3_prepare_v2(s_db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
     sqlite3_bind_text(stmt, 1, key, -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 2, value, -1, SQLITE_STATIC);
+
+    int rc = (sqlite3_step(stmt) == SQLITE_DONE) ? 0 : -1;
+    sqlite3_finalize(stmt);
+    return rc;
+}
+
+int db_get_user_by_rfid(const char *tag, user_record_t *out)
+{
+    if (!s_db || !tag || tag[0] == '\0' || !out) return -1;
+
+    char sql[512];
+    snprintf(sql, sizeof(sql), "%s WHERE rfid_tag = ?;", k_user_select);
+
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(s_db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(stmt, 1, tag, -1, SQLITE_STATIC);
+
+    int rc = -1;
+    if (sqlite3_step(stmt) == SQLITE_ROW) { fill_user(stmt, out); rc = 0; }
+    sqlite3_finalize(stmt);
+    return rc;
+}
+
+int db_set_user_rfid(int user_id, const char *tag)
+{
+    if (!s_db) return -1;
+
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(s_db,
+            "UPDATE users SET rfid_tag = ? WHERE id = ?;",
+            -1, &stmt, NULL) != SQLITE_OK) return -1;
+
+    if (tag && tag[0] != '\0')
+        sqlite3_bind_text(stmt, 1, tag, -1, SQLITE_STATIC);
+    else
+        sqlite3_bind_null(stmt, 1);
+    sqlite3_bind_int(stmt, 2, user_id);
 
     int rc = (sqlite3_step(stmt) == SQLITE_DONE) ? 0 : -1;
     sqlite3_finalize(stmt);

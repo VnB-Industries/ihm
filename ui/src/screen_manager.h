@@ -34,6 +34,22 @@ void         screen_manager_init(void);
 void         screen_manager_load(screen_id_t id);
 screen_id_t  screen_manager_current(void);
 
+/* ── RFID enrollment ─────────────────────────────────────────────── */
+
+typedef enum {
+    RFID_ENROLL_OK,       /* tag successfully linked               */
+    RFID_ENROLL_TAKEN,    /* tag already belongs to another user   */
+    RFID_ENROLL_TIMEOUT   /* 30 s window elapsed without a scan    */
+} rfid_enroll_result_t;
+
+/** Start an RFID enrollment window for @p user_id.
+ *  @p cb is called exactly once with the result. */
+void screen_manager_rfid_enroll_start(int user_id, uint32_t timeout_ms,
+                                      void (*cb)(rfid_enroll_result_t));
+
+/** Cancel an in-progress enrollment (safe to call when none is active). */
+void screen_manager_rfid_enroll_cancel(void);
+
 #ifdef __cplusplus
 }
 #endif

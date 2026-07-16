@@ -25,6 +25,10 @@
 static int s_serial_fd = -1;
 static char s_serial_device[64] = "";
 
+/* ── unsolicited-message line buffer (RFID readings) ─────────────────── */
+static char s_rx_buf[256];
+static int  s_rx_len = 0;
+
 /* Resolve the first device matching the glob pattern in IHM_SERIAL_DEVICE.
  * Returns true and fills buf when a match is found, false otherwise. */
 static bool serial_find_device(char *buf, size_t buflen)
@@ -144,6 +148,7 @@ bool serial_comm_send_dispense_cl(int pump1_cl, int pump2_cl)
      * Serial.print() blocks, stalling loop() and causing 2-5 s dispensing lag
      * after several uses. */
     tcflush(s_serial_fd, TCIFLUSH);
+    s_rx_len = 0;   /* also discard any partially buffered line */
 
     char command[64];
     int n = snprintf(command, sizeof(command), "DISPENSE:%d:%d\n", pump1_cl, pump2_cl);
@@ -206,4 +211,56 @@ bool serial_comm_send_stop(void)
     tcdrain(s_serial_fd);
     fprintf(stderr, "[serial] STOP sent\n");
     return true;
+}
+
+bool serial_comm_read_rfid(char *tag_out, size_t tag_len)
+{
+    if (!tag_out || tag_len == 0 || s_serial_fd < 0) return false;
+
+    /* Non-blocking check: return immediately if no bytes are waiting */
+    fd_set readfds;
+    struct timeval tv = {0, 0};
+    FD_ZERO(&readfds);
+    FD_SET(s_serial_fd, &readfds);
+    if (select(s_serial_fd + 1, &readfds, NULL, NULL, &tv) <= 0) return false;
+
+    ssize_t n = read(s_serial_fd,
+                     s_rx_buf + s_rx_len,
+                     (sizeof(s_rx_buf) - 1) - (size_t)s_rx_len);
+    if (n <= 0) return false;
+    s_rx_len += (int)n;
+    s_rx_buf[s_rx_len] = '\0';
+
+    /* Scan for complete newline-terminated lines */
+    char *p = s_rx_buf;
+    char *nl;
+    while ((nl = memchr(p, '\n', (size_t)(s_rx_buf + s_rx_len - p))) != NULL) {
+        *nl = '\0';
+        int len = (int)(nl - p);
+        if (len > 0 && p[len - 1] == '\r') { p[--len] = '\0'; }
+
+        if (strncmp(p, "RFID:", 5) == 0 && len > 5) {
+            strncpy(tag_out, p + 5, tag_len - 1);
+            tag_out[tag_len - 1] = '\0';
+            /* Shift the rest of the buffer down */
+            char *next = nl + 1;
+            int rem = (int)(s_rx_buf + s_rx_len - next);
+            if (rem > 0) memmove(s_rx_buf, next, (size_t)rem);
+            s_rx_len = rem;
+            s_rx_buf[s_rx_len] = '\0';
+            return true;
+        }
+        p = nl + 1;   /* discard non-RFID line, keep scanning */
+    }
+
+    /* Compact: drop fully-scanned non-RFID lines */
+    if (p > s_rx_buf) {
+        int rem = (int)(s_rx_buf + s_rx_len - p);
+        if (rem > 0) memmove(s_rx_buf, p, (size_t)rem);
+        s_rx_len = rem;
+        s_rx_buf[s_rx_len] = '\0';
+    }
+    /* Overflow guard: discard everything if buffer fills without a newline */
+    if (s_rx_len >= (int)(sizeof(s_rx_buf) - 1)) { s_rx_len = 0; }
+    return false;
 }

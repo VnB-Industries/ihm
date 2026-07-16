@@ -71,11 +71,22 @@ static int         s_purge_pump_sel;     /* 0=pump1 / 1=pump2 / 2=both */
 static char s_pin_buf[5] = {'\0'};
 static int  s_pin_len    = 0;
 
+/* RFID enrollment */
+static lv_obj_t   *s_params_rfid_popup;
+static lv_obj_t   *s_params_rfid_spinner;
+static lv_obj_t   *s_params_rfid_status;
+static lv_obj_t   *s_params_rfid_countdown;
+static lv_obj_t   *s_params_rfid_cancel_btn;
+static lv_obj_t   *s_params_rfid_close_btn;
+static lv_timer_t *s_params_rfid_timer      = NULL;
+static int         s_params_rfid_enroll_uid = -1;
+static uint32_t    s_params_rfid_deadline   = 0;
+
 /* ── forward declarations ───────────────────────────────────────────────── */
 
 static void on_delete_user(lv_event_t *e);
-static void stop_purge(void);
-
+static void stop_purge(void);static void on_params_enrollment_result(rfid_enroll_result_t result);
+static void on_rfid_badge_btn(lv_event_t *e);
 /* ── PIN helpers ────────────────────────────────────────────────────────── */
 
 static void update_pin_display(void)
@@ -105,16 +116,34 @@ static void refresh_user_list(void)
         lv_obj_set_style_radius(row, 6, LV_PART_MAIN);
         lv_obj_set_style_pad_hor(row, 10, LV_PART_MAIN);
         lv_obj_set_style_pad_ver(row, 0, LV_PART_MAIN);
+        lv_obj_set_style_pad_gap(row, 8, LV_PART_MAIN);
         lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
-        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN,
+        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START,
                               LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
         lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
 
+        /* Name — grows to fill available space */
         lv_obj_t *lbl = lv_label_create(row);
         lv_label_set_text(lbl, users[i].name);
         lv_obj_set_style_text_color(lbl, lv_color_hex(0xEAEAEA), LV_PART_MAIN);
-        lv_obj_set_width(lbl, SCREEN_INNER_W - 108);
+        lv_obj_set_flex_grow(lbl, 1);
 
+        /* Badge link/unlink button */
+        bool has_badge = (users[i].rfid_tag[0] != '\0');
+        lv_obj_t *badge_btn = lv_btn_create(row);
+        lv_obj_set_size(badge_btn, 130, 36);
+        lv_obj_set_style_bg_color(badge_btn,
+            has_badge ? lv_color_hex(0xF57C00) : lv_color_hex(0x0F3460),
+            LV_PART_MAIN);
+        lv_obj_set_style_radius(badge_btn, 6, LV_PART_MAIN);
+        lv_obj_add_event_cb(badge_btn, on_rfid_badge_btn, LV_EVENT_CLICKED,
+                            (void *)(intptr_t)users[i].id);
+        lv_obj_t *badge_lbl = lv_label_create(badge_btn);
+        lv_label_set_text(badge_lbl,
+            has_badge ? LV_SYMBOL_WIFI "  Delier" : LV_SYMBOL_WIFI "  Lier");
+        lv_obj_center(badge_lbl);
+
+        /* Delete button */
         lv_obj_t *del = lv_btn_create(row);
         lv_obj_set_size(del, 60, 36);
         lv_obj_set_style_bg_color(del, lv_color_hex(0xD50000), LV_PART_MAIN);
@@ -413,6 +442,119 @@ static void on_purge_pump_sel(lv_event_t *e)
 {
     s_purge_pump_sel = (int)(intptr_t)lv_event_get_user_data(e);
     update_purge_pump_btns();
+}
+
+/* ── RFID badge link/unlink callbacks ────────────────────────────── */
+
+static void on_params_rfid_tick(lv_timer_t *t)
+{
+    (void)t;
+    uint32_t now = lv_tick_get();
+    if (now >= s_params_rfid_deadline) {
+        lv_label_set_text(s_params_rfid_countdown, "0 s");
+        lv_timer_delete(s_params_rfid_timer);
+        s_params_rfid_timer = NULL;
+        return;
+    }
+    uint32_t rem = (s_params_rfid_deadline - now + 999) / 1000;
+    char buf[12];
+    lv_snprintf(buf, sizeof(buf), "%lu s", (unsigned long)rem);
+    lv_label_set_text(s_params_rfid_countdown, buf);
+}
+
+static void on_params_enrollment_result(rfid_enroll_result_t result)
+{
+    if (result == RFID_ENROLL_OK) {
+        if (s_params_rfid_timer) {
+            lv_timer_delete(s_params_rfid_timer);
+            s_params_rfid_timer = NULL;
+        }
+        lv_obj_add_flag(s_params_rfid_spinner,    LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_params_rfid_cancel_btn, LV_OBJ_FLAG_HIDDEN);
+        lv_label_set_text(s_params_rfid_status,
+                          LV_SYMBOL_OK "  Badge enregistre !");
+        lv_obj_set_style_text_color(s_params_rfid_status,
+                                    lv_color_hex(0x00C853), LV_PART_MAIN);
+        lv_label_set_text(s_params_rfid_countdown, "");
+        lv_obj_clear_flag(s_params_rfid_close_btn, LV_OBJ_FLAG_HIDDEN);
+
+    } else if (result == RFID_ENROLL_TAKEN) {
+        lv_label_set_text(s_params_rfid_status,
+                          LV_SYMBOL_WARNING "  Badge deja utilise !");
+        lv_obj_set_style_text_color(s_params_rfid_status,
+                                    lv_color_hex(0xE94560), LV_PART_MAIN);
+        s_params_rfid_deadline = lv_tick_get() + 30000;
+        lv_label_set_text(s_params_rfid_countdown, "30 s");
+        screen_manager_rfid_enroll_start(s_params_rfid_enroll_uid, 30000,
+                                         on_params_enrollment_result);
+        if (s_params_rfid_timer) lv_timer_delete(s_params_rfid_timer);
+        s_params_rfid_timer = lv_timer_create(on_params_rfid_tick, 1000, NULL);
+
+    } else {   /* RFID_ENROLL_TIMEOUT */
+        if (s_params_rfid_timer) {
+            lv_timer_delete(s_params_rfid_timer);
+            s_params_rfid_timer = NULL;
+        }
+        lv_obj_add_flag(s_params_rfid_spinner,    LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_params_rfid_cancel_btn, LV_OBJ_FLAG_HIDDEN);
+        lv_label_set_text(s_params_rfid_status, "Delai depasse.");
+        lv_obj_set_style_text_color(s_params_rfid_status,
+                                    lv_color_hex(0x888888), LV_PART_MAIN);
+        lv_label_set_text(s_params_rfid_countdown, "");
+        lv_obj_clear_flag(s_params_rfid_close_btn, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void on_rfid_badge_btn(lv_event_t *e)
+{
+    int uid = (int)(intptr_t)lv_event_get_user_data(e);
+    user_record_t u;
+    if (db_get_user(uid, &u) != 0) return;
+
+    if (u.rfid_tag[0] != '\0') {
+        /* Has badge — unlink immediately */
+        db_set_user_rfid(uid, NULL);
+        refresh_user_list();
+        return;
+    }
+
+    /* No badge — start enrollment */
+    s_params_rfid_enroll_uid = uid;
+    s_params_rfid_deadline   = lv_tick_get() + 30000;
+
+    lv_label_set_text(s_params_rfid_status, "Presente ton badge");
+    lv_obj_set_style_text_color(s_params_rfid_status,
+                                lv_color_hex(0xEAEAEA), LV_PART_MAIN);
+    lv_label_set_text(s_params_rfid_countdown, "30 s");
+    lv_obj_clear_flag(s_params_rfid_spinner,    LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(s_params_rfid_cancel_btn, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_params_rfid_close_btn, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(s_params_rfid_popup, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(s_params_rfid_popup);
+
+    screen_manager_rfid_enroll_start(uid, 30000, on_params_enrollment_result);
+    if (s_params_rfid_timer) lv_timer_delete(s_params_rfid_timer);
+    s_params_rfid_timer = lv_timer_create(on_params_rfid_tick, 1000, NULL);
+}
+
+static void on_params_rfid_cancel(lv_event_t *e)
+{
+    (void)e;
+    if (s_params_rfid_timer) {
+        lv_timer_delete(s_params_rfid_timer);
+        s_params_rfid_timer = NULL;
+    }
+    screen_manager_rfid_enroll_cancel();
+    lv_obj_add_flag(s_params_rfid_popup, LV_OBJ_FLAG_HIDDEN);
+    s_params_rfid_enroll_uid = -1;
+}
+
+static void on_params_rfid_close(lv_event_t *e)
+{
+    (void)e;
+    lv_obj_add_flag(s_params_rfid_popup, LV_OBJ_FLAG_HIDDEN);
+    s_params_rfid_enroll_uid = -1;
+    refresh_user_list();
 }
 
 static void on_purge_start_clicked(lv_event_t *e)
@@ -853,6 +995,60 @@ void scr_parameters_init(void)
     lv_obj_t *lbl_confirm_delete = lv_label_create(btn_confirm_delete);
     lv_label_set_text(lbl_confirm_delete, LV_SYMBOL_TRASH "  Supprimer");
     lv_obj_center(lbl_confirm_delete);
+
+    /* ── RFID enrollment popup ──────────────────────────────────────── */
+    s_params_rfid_popup = lv_obj_create(s_screen);
+    lv_obj_set_size(s_params_rfid_popup, 420, 250);
+    lv_obj_align(s_params_rfid_popup, LV_ALIGN_CENTER, 0, -30);
+    lv_obj_set_style_bg_color(s_params_rfid_popup, lv_color_hex(0x16213E), LV_PART_MAIN);
+    lv_obj_set_style_border_width(s_params_rfid_popup, 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(s_params_rfid_popup, 12, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(s_params_rfid_popup, 16, LV_PART_MAIN);
+    lv_obj_clear_flag(s_params_rfid_popup, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_params_rfid_popup, LV_OBJ_FLAG_HIDDEN);
+
+    lv_obj_t *rfid_title = lv_label_create(s_params_rfid_popup);
+    lv_label_set_text(rfid_title, LV_SYMBOL_WIFI "  Lier un badge RFID");
+    lv_obj_set_style_text_color(rfid_title, lv_color_hex(0xF5C518), LV_PART_MAIN);
+    lv_obj_align(rfid_title, LV_ALIGN_TOP_MID, 0, 0);
+
+    s_params_rfid_spinner = lv_spinner_create(s_params_rfid_popup);
+    lv_obj_set_size(s_params_rfid_spinner, 54, 54);
+    lv_obj_align(s_params_rfid_spinner, LV_ALIGN_TOP_MID, 0, 34);
+    lv_spinner_set_anim_params(s_params_rfid_spinner, 1000, 60);
+
+    s_params_rfid_status = lv_label_create(s_params_rfid_popup);
+    lv_label_set_text(s_params_rfid_status, "Presente ton badge");
+    lv_obj_set_style_text_color(s_params_rfid_status,
+                                lv_color_hex(0xEAEAEA), LV_PART_MAIN);
+    lv_obj_align(s_params_rfid_status, LV_ALIGN_TOP_MID, 0, 100);
+
+    s_params_rfid_countdown = lv_label_create(s_params_rfid_popup);
+    lv_label_set_text(s_params_rfid_countdown, "30 s");
+    lv_obj_set_style_text_color(s_params_rfid_countdown,
+                                lv_color_hex(0xF5C518), LV_PART_MAIN);
+    lv_obj_align(s_params_rfid_countdown, LV_ALIGN_TOP_MID, 0, 128);
+
+    s_params_rfid_cancel_btn = lv_btn_create(s_params_rfid_popup);
+    lv_obj_set_size(s_params_rfid_cancel_btn, 150, 42);
+    lv_obj_align(s_params_rfid_cancel_btn, LV_ALIGN_BOTTOM_LEFT, 0, 0);
+    lv_obj_set_style_bg_color(s_params_rfid_cancel_btn, lv_color_hex(0x444444), LV_PART_MAIN);
+    lv_obj_add_event_cb(s_params_rfid_cancel_btn, on_params_rfid_cancel,
+                        LV_EVENT_CLICKED, NULL);
+    lv_obj_t *rfid_cancel_lbl = lv_label_create(s_params_rfid_cancel_btn);
+    lv_label_set_text(rfid_cancel_lbl, LV_SYMBOL_CLOSE "  Annuler");
+    lv_obj_center(rfid_cancel_lbl);
+
+    s_params_rfid_close_btn = lv_btn_create(s_params_rfid_popup);
+    lv_obj_set_size(s_params_rfid_close_btn, 150, 42);
+    lv_obj_align(s_params_rfid_close_btn, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
+    lv_obj_set_style_bg_color(s_params_rfid_close_btn, lv_color_hex(0x444444), LV_PART_MAIN);
+    lv_obj_add_flag(s_params_rfid_close_btn, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_event_cb(s_params_rfid_close_btn, on_params_rfid_close,
+                        LV_EVENT_CLICKED, NULL);
+    lv_obj_t *rfid_close_lbl = lv_label_create(s_params_rfid_close_btn);
+    lv_label_set_text(rfid_close_lbl, LV_SYMBOL_OK "  Fermer");
+    lv_obj_center(rfid_close_lbl);
 }
 
 lv_obj_t *scr_parameters_get(void) { return s_screen; }
@@ -871,6 +1067,14 @@ void scr_parameters_refresh(void)
     lv_obj_add_flag(s_kb,           LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(s_cfg_panel,    LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(s_delete_popup, LV_OBJ_FLAG_HIDDEN);
+    /* Cancel any in-progress RFID enrollment */
+    if (s_params_rfid_timer) {
+        lv_timer_delete(s_params_rfid_timer);
+        s_params_rfid_timer = NULL;
+    }
+    screen_manager_rfid_enroll_cancel();
+    lv_obj_add_flag(s_params_rfid_popup, LV_OBJ_FLAG_HIDDEN);
+    s_params_rfid_enroll_uid    = -1;
     s_pending_delete_uid    = -1;
     s_pending_delete_name[0] = '\0';
     lv_obj_clear_flag(s_pin_panel, LV_OBJ_FLAG_HIDDEN);
