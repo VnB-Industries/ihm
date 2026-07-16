@@ -15,7 +15,7 @@ static void on_user_clicked(lv_event_t *e)
 {
     int uid = (int)(intptr_t)lv_event_get_user_data(e);
     game_set_active_user(uid);
-    screen_manager_load(SCREEN_WHEEL);
+    screen_manager_load(SCREEN_GLASS_SELECT);
 }
 
 static void on_back_clicked(lv_event_t *e)

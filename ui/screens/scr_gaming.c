@@ -174,16 +174,21 @@ static void on_wheel_result(lv_obj_t *wf, uint16_t seg_index,
     play_confetti_once();
 #endif
 
-    int cl = (int)seg->value;
-    (void)serial_comm_send_dispense_cl(cl);
+    int pump1_cl = (int)seg->value;
+    int glass_cl = game_get_selected_glass_cl();
+    int pump2_cl = glass_cl - pump1_cl;
+    if (pump2_cl < 0) {
+        pump2_cl = 0;
+    }
+
+    (void)serial_comm_send_dispense_cl(pump1_cl, pump2_cl);
 
     char buf[48];
     lv_snprintf(buf, sizeof(buf),
-                cl == 0 ? "Chance ! 0 cL"
-                        : "Tu bois %d cL !", cl);
+                "P1 %d cL | P2 %d cL", pump1_cl, pump2_cl);
     lv_label_set_text(s_result_label, buf);
 
-    bool bonus_triggered = game_on_basic_spin(game_get_active_user(), cl);
+    bool bonus_triggered = game_on_basic_spin(game_get_active_user(), pump1_cl);
     if (bonus_triggered) {
         lv_obj_clear_flag(s_bonus_btn, LV_OBJ_FLAG_HIDDEN);
         /* Cooldown still applies after bonus wheel; will be checked on SCREEN_WHEEL re-entry */

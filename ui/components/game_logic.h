@@ -72,6 +72,9 @@ void            game_set_active_user(int user_id);
 modifier_type_t game_get_pending_modifier(void);
 void            game_set_pending_modifier(modifier_type_t m);
 
+int             game_get_selected_glass_cl(void);
+void            game_set_selected_glass_cl(int glass_cl);
+
 #ifdef __cplusplus
 }
 #endif
