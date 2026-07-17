@@ -1,76 +1,84 @@
-# Ricardo – IHM jeu de la roue
+# Ricardo - IHM Jeu de la roue
 
-Jeu de boisson sur LVGL v9 / SDL2 (simulateur PC) et cible embarquee.  
-Ecran 1024x600 (7 pouces). Persistance SQLite3.
+Application IHM de jeu de boisson basee sur LVGL v9.
 
-## Ecrans
+- Resolution cible: 1024x600
+- Persistance: SQLite3 (`game.db`)
+- Cibles: simulateur PC et Raspberry Pi (native ou cross-compilation)
+
+## Fonctionnalites
 
 | Ecran | Role |
 |---|---|
-| **Accueil** | Boutons Jouer / Classement / Parametres |
-| **Profil** | Grille de selection de l'utilisateur actif |
-| **Roue principale** | Roue fortune 0/2/4/6 cL, modifiee par bonus/malus |
-| **Roue bonus** | Declenchee aleatoirement apres un spin : Bonus / Malus / +Temps / -Temps / Rien |
-| **Donner modificateur** | Choisir a qui attribuer le modificateur gagne |
-| **Classement** | Tableau tri par cL bus : Joueur / Total cL / Bonus / Malus / A donne a |
-| **Parametres** | Acces PIN (2106), configuration complete |
+| Accueil | Boutons Jouer / Classement / Parametres |
+| Profil | Selection de l'utilisateur actif |
+| Roue principale | Tirage 0/2/4/6 cL avec impact bonus/malus |
+| Roue bonus | Bonus / Malus / +Temps / -Temps / Rien |
+| Donner modificateur | Attribution du bonus/malus gagne |
+| Classement | Joueur / Total cL / Bonus / Malus / A donne a |
+| Parametres | Acces PIN (2106), configuration complete |
 
-## Mecaniques de jeu
+## Mecanique de jeu
 
-- **Roue principale** : valeurs de base 0 / 2 / 4 / 6 cL, decalees de ±2 cL par niveau de malus/bonus actif.
-- **Roue bonus** : poids configurables independamment pour Bonus, Rien, Malus, +Temps, -Temps.
-- **Modificateurs** : bonus et malus s'empilent jusqu'a un maximum configurable (defaut 5).
-- **Timeout** : +Temps et -Temps ajoutent/retirent N minutes de cooldown a l'utilisateur cible.
-- **Cooldown par joueur** : delai configurable entre deux spins ; compteur en direct sur l'ecran roue.
-- **Classement** : colonne "A donne a" affiche le dernier modificateur donne avec la cible.
+- Roue principale: base 0 / 2 / 4 / 6 cL, puis decalage selon bonus/malus actifs.
+- Roue bonus: probabilites configurables pour chaque segment.
+- Bonus/malus: empilement jusqu'au max configure.
+- Timeout: +Temps / -Temps ajoutent ou retirent un cooldown en minutes.
+- Cooldown joueur: delai configurable entre deux spins.
 
-## Parametres configurables (via ecran Parametres)
+## Parametres configurables
 
 | Cle | Defaut | Description |
 |---|---|---|
-| `wheel_trigger_chance` | 20 % | Probabilite de declencher la roue bonus |
+| `wheel_trigger_chance` | 20 | Probabilite de declencher la roue bonus (en %) |
 | `bonus_wheel_bonus_weight` | 1 | Poids du segment Bonus |
 | `bonus_wheel_nothing_weight` | 2 | Poids du segment Rien |
 | `bonus_wheel_malus_weight` | 1 | Poids du segment Malus |
 | `bonus_wheel_timeout_add_weight` | 1 | Poids du segment +Temps |
 | `bonus_wheel_timeout_remove_weight` | 1 | Poids du segment -Temps |
-| `timeout_modifier_minutes` | 5 min | Duree d'un modificateur Temps |
-| `max_bonus_stack` | 5 | Empilement maxi de bonus |
-| `max_malus_stack` | 5 | Empilement maxi de malus |
-| `spin_cooldown_seconds` | 0 s | Cooldown entre deux spins |
+| `timeout_modifier_minutes` | 5 | Duree d'un modificateur Temps (minutes) |
+| `max_bonus_stack` | 5 | Empilement max de bonus |
+| `max_malus_stack` | 5 | Empilement max de malus |
+| `spin_cooldown_seconds` | 0 | Cooldown entre deux spins (secondes) |
 
-## Base de données
+## Architecture
 
-SQLite3, fichier `game.db` cree automatiquement au premier lancement.  
-Script `lv_port_pc_vscode/gen_mock_db.sh` pour regenerer une base de test avec 6 utilisateurs.
+Le code IHM principal est dans `ihm/ui`.
 
-## Build (simulateur PC)
+- `ihm/ui/screens`: ecrans
+- `ihm/ui/widgets`: widgets reutilisables
+- `ihm/ui/components`: logique metier + persistence SQLite
+- `ihm/ui/src`: entree application et orchestration
+- `ihm/ui/third_party/lvgl`: LVGL v9 vendore
+- `ihm/ui/third_party/lv_drivers`: conserve dans le depot, non lie pour la cible Pi
+
+Important: sur Raspberry Pi, le build utilise les backends Linux integres de LVGL v9 (`fbdev` / `drm` / `evdev`), pas `lv_drivers`.
+
+## Prerequis
+
+- CMake >= 3.15
+- Compilateur C/C++
+- `pkg-config`
+- `sqlite3` + fichiers de dev (`sqlite3.pc`)
+- Selon backend Linux:
+  - FBDEV: acces a `/dev/fb0` et `/dev/input/eventX`
+  - DRM: `libdrm` + acces a `/dev/dri/card0`
+
+## Build et execution
+
+### 1) Simulateur PC (workflow historique)
 
 ```bash
 cd lv_port_pc_vscode/build
-make -j$(nproc)
+cmake --build . -j$(nproc)
 ./bin/main
 ```
 
-## Build (cible Raspberry Pi)
-
-Le binaire cible est `ihm/ui/ihm.app` et son build ne depend pas du dossier `lv_port_pc_vscode`.
-
-Le depot `ihm` embarque maintenant ses dependances dans:
-
-- `ihm/ui/third_party/lvgl`
-- `ihm/ui/third_party/lv_drivers`
-
-Important: pour la cible Linux sur Raspberry Pi avec LVGL v9, `lv_drivers` n'est pas le chemin actif pour l'affichage et le tactile.
-Le depot `lv_drivers` est conserve dans le projet, mais le build Pi utilise les pilotes Linux integres a LVGL v9 (`fbdev`, `drm`, `evdev`).
-Les options LVGL lourdes liees au vectoriel sont aussi desactivees par defaut pour la cible Pi: `LV_USE_VECTOR_GRAPHIC`, `LV_USE_THORVG_INTERNAL`, `LV_USE_THORVG_EXTERNAL`, `LV_USE_LOTTIE` et `LV_USE_SVG`.
-Cela evite de tirer ThorVG au link et garde le binaire plus leger.
-
-Configuration native Linux:
+### 2) IHM standalone native Linux (dans `ihm/ui`)
 
 ```bash
 cd ihm/ui
-cmake -B build \
+cmake -S . -B build \
   -DIHM_USE_LINUX_FBDEV=ON \
   -DIHM_USE_LINUX_DRM=OFF \
   -DIHM_SCREEN_WIDTH=1024 \
@@ -78,20 +86,24 @@ cmake -B build \
   -DIHM_FBDEV_DEVICE=/dev/fb0 \
   -DIHM_EVDEV_DEVICE=/dev/input/event0
 cmake --build build -j$(nproc)
+./build/ihm.app
 ```
 
-Cross-compilation Raspberry Pi avec sysroot monte via SSHFS:
+### 3) Cross-compilation Raspberry Pi (AArch64)
+
+Monter d'abord le sysroot (sans `sudo`):
 
 ```bash
 mkdir -p /home/vvicier/sdk/pi-sysroot
-sshfs ricardo@192.168.1.2:/ /home/vvicier/sdk/pi-sysroot
+sshfs ricardo@192.168.1.2:/ /home/vvicier/sdk/pi-sysroot \
+  -o ro,reconnect,follow_symlinks,idmap=user,uid=$(id -u),gid=$(id -g)
 ```
 
-Puis lancer la configuration CMake avec le toolchain AArch64 correspondant a l'image Pi:
+Puis configurer et compiler:
 
 ```bash
 cd ihm/ui
-cmake -B build-rpi-mount \
+cmake -S . -B build-rpi-mount \
   -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/raspberrypi3-linux-aarch64.cmake \
   -DCMAKE_SYSROOT=/home/vvicier/sdk/pi-sysroot \
   -DIHM_USE_LINUX_FBDEV=ON \
@@ -102,15 +114,39 @@ cmake -B build-rpi-mount \
 cmake --build build-rpi-mount -j$(nproc)
 ```
 
-Le fichier `cmake/toolchains/raspberrypi3-linux-aarch64.cmake` est le bon choix pour une image Raspberry Pi OS 64 bits. 
-Si vous utilisez une image 32 bits, conservez `cmake/toolchains/raspberrypi3-linux-gnueabihf.cmake` et un sysroot `armhf` correspondant.
+Sortie binaire cross-compilee:
 
-## Structure
+- `ihm/ui/build-rpi-mount/ihm.app`
 
+Note architecture:
+
+- Image Raspberry Pi OS 64 bits: `cmake/toolchains/raspberrypi3-linux-aarch64.cmake`
+- Image 32 bits: utiliser le toolchain `gnueabihf` avec un sysroot `armhf` correspondant
+
+## Deployment et service
+
+- Le service systemd reference dans ce repo est `ihm-app.service`.
+- Il attend un binaire sur la cible a l'emplacement `/home/ricardo/ihm/ihm.app`.
+- Le build CMake produit `ihm.app` dans le dossier de build (`build` ou `build-rpi-mount`).
+
+Si besoin d'installation via CMake:
+
+```bash
+cd ihm/ui
+cmake --install build-rpi-mount --prefix /home/ricardo/ihm
 ```
-ihm/ui/
-  screens/   – un fichier .c/.h par ecran
-  widgets/   – wheel_fortune (widget roue reutilisable)
-  components/ – game_db (SQLite3), game_logic (regles)
-  src/       – main, screen_manager
-```
+
+Le binaire sera alors installe dans `/home/ricardo/ihm/bin/ihm.app` (adapter le service ou copier/renommer selon votre convention).
+
+## Base de donnees
+
+- `game.db` est cree automatiquement au premier lancement.
+- Script de generation de donnees de test: `lv_port_pc_vscode/gen_mock_db.sh`
+
+## Depannage rapide
+
+- Si vous lancez `clean-third-party`, relancez `cmake -S . -B <build-dir> ...` avant `cmake --build`.
+- Si le build cross echoue avec GLIBC_2.38, verifier que:
+  - le sysroot est monte en utilisateur normal,
+  - le toolchain AArch64 du repo est bien utilise,
+  - vous avez fait un rebuild propre de `build-rpi-mount` et `.third_party_build/lvgl`.
