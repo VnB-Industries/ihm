@@ -30,20 +30,21 @@ static void fill_user(sqlite3_stmt *stmt, user_record_t *u)
     const char *n     = (const char *)sqlite3_column_text(stmt, 1);
     strncpy(u->name, n ? n : "", GAME_DB_NAME_LEN - 1);
     u->name[GAME_DB_NAME_LEN - 1] = '\0';
-    u->bonus          = sqlite3_column_int(stmt, 2);
-    u->malus          = sqlite3_column_int(stmt, 3);
-    u->wheel_trigger  = sqlite3_column_int(stmt, 4);
-    u->total_cl       = sqlite3_column_int(stmt, 5);
-    u->given_modifier = sqlite3_column_int(stmt, 6);
-    u->given_to_id    = sqlite3_column_int(stmt, 7);
-    u->last_spin_epoch = sqlite3_column_int64(stmt, 8);
-    const char *tag = (const char *)sqlite3_column_text(stmt, 9);
+    u->is_admin       = sqlite3_column_int(stmt, 2) != 0;
+    u->bonus          = sqlite3_column_int(stmt, 3);
+    u->malus          = sqlite3_column_int(stmt, 4);
+    u->wheel_trigger  = sqlite3_column_int(stmt, 5);
+    u->total_cl       = sqlite3_column_int(stmt, 6);
+    u->given_modifier = sqlite3_column_int(stmt, 7);
+    u->given_to_id    = sqlite3_column_int(stmt, 8);
+    u->last_spin_epoch = sqlite3_column_int64(stmt, 9);
+    const char *tag = (const char *)sqlite3_column_text(stmt, 10);
     strncpy(u->rfid_tag, tag ? tag : "", sizeof(u->rfid_tag) - 1);
     u->rfid_tag[sizeof(u->rfid_tag) - 1] = '\0';
 }
 
 static const char k_user_select[] =
-    "SELECT id, name, bonus, malus, wheel_trigger, total_cl,"
+    "SELECT id, name, is_admin, bonus, malus, wheel_trigger, total_cl,"
     "       given_modifier, given_to_id, last_spin_epoch, rfid_tag FROM users";
 
 /* ── public API ─────────────────────────────────────────────────────────── */
@@ -59,6 +60,7 @@ int db_init(const char *path)
         "CREATE TABLE IF NOT EXISTS users ("
         "  id             INTEGER PRIMARY KEY AUTOINCREMENT,"
         "  name           TEXT    NOT NULL UNIQUE COLLATE NOCASE,"
+        "  is_admin       INTEGER NOT NULL DEFAULT 0,"
         "  bonus          INTEGER NOT NULL DEFAULT 0,"
         "  malus          INTEGER NOT NULL DEFAULT 0,"
         "  wheel_trigger  INTEGER NOT NULL DEFAULT 0,"
@@ -130,6 +132,11 @@ int db_init(const char *path)
         "ALTER TABLE users ADD COLUMN rfid_tag TEXT;"
     );
 
+    /* Schema migration: add is_admin column if not present yet. */
+    exec_sql_quiet(
+        "ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0;"
+    );
+
     return 0;
 }
 
@@ -194,20 +201,21 @@ int db_update_user(const user_record_t *u)
     if (!s_db || !u) return -1;
 
     const char *sql =
-        "UPDATE users SET bonus=?, malus=?, wheel_trigger=?, total_cl=?,"
+        "UPDATE users SET is_admin=?, bonus=?, malus=?, wheel_trigger=?, total_cl=?,"
         "                 given_modifier=?, given_to_id=?, last_spin_epoch=?"
         " WHERE id=?;";
 
     sqlite3_stmt *stmt = NULL;
     if (sqlite3_prepare_v2(s_db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
-    sqlite3_bind_int  (stmt, 1, u->bonus);
-    sqlite3_bind_int  (stmt, 2, u->malus);
-    sqlite3_bind_int  (stmt, 3, u->wheel_trigger);
-    sqlite3_bind_int  (stmt, 4, u->total_cl);
-    sqlite3_bind_int  (stmt, 5, u->given_modifier);
-    sqlite3_bind_int  (stmt, 6, u->given_to_id);
-    sqlite3_bind_int64(stmt, 7, u->last_spin_epoch);
-    sqlite3_bind_int  (stmt, 8, u->id);
+    sqlite3_bind_int  (stmt, 1, u->is_admin ? 1 : 0);
+    sqlite3_bind_int  (stmt, 2, u->bonus);
+    sqlite3_bind_int  (stmt, 3, u->malus);
+    sqlite3_bind_int  (stmt, 4, u->wheel_trigger);
+    sqlite3_bind_int  (stmt, 5, u->total_cl);
+    sqlite3_bind_int  (stmt, 6, u->given_modifier);
+    sqlite3_bind_int  (stmt, 7, u->given_to_id);
+    sqlite3_bind_int64(stmt, 8, u->last_spin_epoch);
+    sqlite3_bind_int  (stmt, 9, u->id);
 
     int rc = (sqlite3_step(stmt) == SQLITE_DONE) ? 0 : -1;
     sqlite3_finalize(stmt);

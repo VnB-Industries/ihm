@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <termios.h>
+#include <time.h>
 #include <unistd.h>
 #include <sys/select.h>
 #include <sys/types.h>
@@ -19,32 +20,171 @@
 #endif
 
 #ifndef IHM_SERIAL_BAUD
-#define IHM_SERIAL_BAUD 115200
+#define IHM_SERIAL_BAUD 9600
 #endif
 
 static int s_serial_fd = -1;
 static char s_serial_device[64] = "";
+static char s_last_response[96] = "";
+static long s_last_reconnect_attempt_ms = -10000;
 
 /* ── unsolicited-message line buffer (RFID readings) ─────────────────── */
 static char s_rx_buf[256];
 static int  s_rx_len = 0;
 
+static bool serial_pattern_has_glob(const char *pattern)
+{
+    if (!pattern) return false;
+    return strchr(pattern, '*') || strchr(pattern, '?') || strchr(pattern, '[');
+}
+
+static bool serial_find_device_from_pattern(const char *pattern, char *buf, size_t buflen)
+{
+    glob_t g;
+    if (!pattern || !buf || buflen == 0) return false;
+
+    if (glob(pattern, GLOB_NOSORT, NULL, &g) != 0 || g.gl_pathc == 0) {
+        globfree(&g);
+        return false;
+    }
+
+    /* Prefer the last entry; on Linux this is commonly the most recent ACM/USB index. */
+    const char *chosen = g.gl_pathv[g.gl_pathc - 1];
+    snprintf(buf, buflen, "%s", chosen);
+    if (g.gl_pathc > 1) {
+        fprintf(stderr, "[serial] %zu devices matched %s, using %s\n",
+                g.gl_pathc, pattern, buf);
+    }
+    globfree(&g);
+    return true;
+}
+
+static long serial_now_ms(void)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+        return 0;
+    }
+    return ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
+}
+
+static void serial_mark_disconnected(void)
+{
+    if (s_serial_fd >= 0) {
+        close(s_serial_fd);
+        s_serial_fd = -1;
+    }
+    s_serial_device[0] = '\0';
+    s_rx_len = 0;
+    s_rx_buf[0] = '\0';
+}
+
+static bool serial_is_disconnect_errno(int e)
+{
+    return e == EIO || e == ENODEV || e == ENXIO || e == EBADF || e == EPIPE || e == ECONNRESET;
+}
+
+static bool serial_ensure_connected(void)
+{
+    if (s_serial_fd >= 0) {
+        return true;
+    }
+
+    long now = serial_now_ms();
+    if (now - s_last_reconnect_attempt_ms < 1000L) {
+        return false;
+    }
+    s_last_reconnect_attempt_ms = now;
+
+    return serial_comm_init();
+}
+
+/* Read one newline-terminated line with timeout into out.
+ * Returns true when a full line is read, false on timeout/error. */
+static bool serial_read_line_with_timeout(char *out, size_t out_len, int timeout_ms)
+{
+    if (!out || out_len == 0 || s_serial_fd < 0 || timeout_ms < 0) {
+        return false;
+    }
+
+    size_t len = 0;
+    out[0] = '\0';
+
+    struct timespec start_ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &start_ts) != 0) {
+        return false;
+    }
+
+    while (1) {
+        struct timespec now_ts;
+        if (clock_gettime(CLOCK_MONOTONIC, &now_ts) != 0) {
+            return false;
+        }
+
+        long elapsed_ms = (now_ts.tv_sec - start_ts.tv_sec) * 1000L
+                        + (now_ts.tv_nsec - start_ts.tv_nsec) / 1000000L;
+        long remaining_ms = (long)timeout_ms - elapsed_ms;
+        if (remaining_ms <= 0) {
+            return false;
+        }
+
+        fd_set readfds;
+        struct timeval tv;
+        tv.tv_sec = (time_t)(remaining_ms / 1000L);
+        tv.tv_usec = (suseconds_t)((remaining_ms % 1000L) * 1000L);
+
+        FD_ZERO(&readfds);
+        FD_SET(s_serial_fd, &readfds);
+
+        int ret = select(s_serial_fd + 1, &readfds, NULL, NULL, &tv);
+        if (ret <= 0) {
+            return false;
+        }
+
+        char c;
+        ssize_t n = read(s_serial_fd, &c, 1);
+        if (n <= 0) {
+            return false;
+        }
+
+        if (c == '\n') {
+            break;
+        }
+
+        if (c == '\r') {
+            continue;
+        }
+
+        if (len + 1 < out_len) {
+            out[len++] = c;
+            out[len] = '\0';
+        }
+    }
+
+    return len > 0;
+}
+
 /* Resolve the first device matching the glob pattern in IHM_SERIAL_DEVICE.
  * Returns true and fills buf when a match is found, false otherwise. */
 static bool serial_find_device(char *buf, size_t buflen)
 {
-    glob_t g;
-    if (glob(IHM_SERIAL_DEVICE, GLOB_NOSORT, NULL, &g) != 0 || g.gl_pathc == 0) {
-        globfree(&g);
-        return false;
+    if (serial_find_device_from_pattern(IHM_SERIAL_DEVICE, buf, buflen)) {
+        return true;
     }
-    snprintf(buf, buflen, "%s", g.gl_pathv[0]);
-    if (g.gl_pathc > 1) {
-        fprintf(stderr, "[serial] %zu ttyACM devices found, using %s\n",
-                g.gl_pathc, buf);
+
+    /* If configured path is fixed (e.g. /dev/ttyACM0) and stale, fallback to dynamic scan. */
+    if (!serial_pattern_has_glob(IHM_SERIAL_DEVICE)) {
+        if (serial_find_device_from_pattern("/dev/ttyACM*", buf, buflen)) {
+            fprintf(stderr, "[serial] fallback from fixed path %s to %s\n", IHM_SERIAL_DEVICE, buf);
+            return true;
+        }
+        if (serial_find_device_from_pattern("/dev/ttyUSB*", buf, buflen)) {
+            fprintf(stderr, "[serial] fallback from fixed path %s to %s\n", IHM_SERIAL_DEVICE, buf);
+            return true;
+        }
     }
-    globfree(&g);
-    return true;
+
+    return false;
 }
 
 static speed_t serial_baud_to_speed(int baud)
@@ -120,6 +260,11 @@ bool serial_comm_init(void)
     return true;
 }
 
+const char *serial_comm_last_response(void)
+{
+    return s_last_response;
+}
+
 void serial_comm_deinit(void)
 {
     if (s_serial_fd >= 0) {
@@ -131,6 +276,8 @@ void serial_comm_deinit(void)
 
 bool serial_comm_send_dispense_cl(int pump1_cl, int pump2_cl)
 {
+    s_last_response[0] = '\0';
+
     if (pump1_cl < 0) {
         pump1_cl = 0;
     }
@@ -139,6 +286,7 @@ bool serial_comm_send_dispense_cl(int pump1_cl, int pump2_cl)
     }
 
     if (s_serial_fd < 0 && !serial_comm_init()) {
+        snprintf(s_last_response, sizeof(s_last_response), "IO:INIT");
         return false;
     }
 
@@ -153,52 +301,134 @@ bool serial_comm_send_dispense_cl(int pump1_cl, int pump2_cl)
     char command[64];
     int n = snprintf(command, sizeof(command), "DISPENSE:%d:%d\n", pump1_cl, pump2_cl);
     if (n < 0 || n >= (int)sizeof(command)) {
+        snprintf(s_last_response, sizeof(s_last_response), "IO:FORMAT");
         return false;
     }
 
-    ssize_t written = write(s_serial_fd, command, (size_t)n);
-    if (written != n) {
-        fprintf(stderr, "[serial] write failed: %s\n", strerror(errno));
-        return false;
-    }
+    for (int attempt = 0; attempt < 2; attempt++) {
+        const long ack_timeout_ms = (attempt == 0) ? 2000L : 3500L;
 
-    if (tcdrain(s_serial_fd) != 0) {
-        fprintf(stderr, "[serial] tcdrain failed: %s\n", strerror(errno));
-        return false;
-    }
+        ssize_t written = write(s_serial_fd, command, (size_t)n);
+        if (written != n) {
+            fprintf(stderr, "[serial] write failed: %s\n", strerror(errno));
+            if (serial_is_disconnect_errno(errno)) {
+                serial_mark_disconnected();
+                if (attempt == 0 && serial_ensure_connected()) {
+                    continue;
+                }
+            }
+            snprintf(s_last_response, sizeof(s_last_response), "IO:WRITE");
+            return false;
+        }
 
-    // Read response from the device, which should be "STARTED:<pump1>:<pump2>".
-    fd_set readfds;
-    struct timeval timeout;
-    FD_ZERO(&readfds);
-    FD_SET(s_serial_fd, &readfds);
-    timeout.tv_sec = 2;  // 2 seconds timeout
-    timeout.tv_usec = 0;
-    char response[64];
-    int ret = select(s_serial_fd + 1, &readfds, NULL, NULL, &timeout);
-    if (ret > 0 && FD_ISSET(s_serial_fd, &readfds)) {
-        ssize_t nread = read(s_serial_fd, response, sizeof(response) - 1);
-        if (nread > 0) {
-            response[nread] = '\0';
-            fprintf(stderr, "[serial] response: %s\n", response);
-            if (strncmp(response, "STARTED:", 8) == 0) {
-                return true;
-            } else {
-                fprintf(stderr, "[serial] unexpected response: %s\n", response);
+        if (tcdrain(s_serial_fd) != 0) {
+            fprintf(stderr, "[serial] tcdrain failed: %s\n", strerror(errno));
+            if (serial_is_disconnect_errno(errno)) {
+                serial_mark_disconnected();
+            }
+            snprintf(s_last_response, sizeof(s_last_response), "IO:DRAIN");
+            return false;
+        }
+
+        // Wait for a valid ack line. Ignore unsolicited status/noise lines.
+        struct timespec start_ts;
+        if (clock_gettime(CLOCK_MONOTONIC, &start_ts) != 0) {
+            snprintf(s_last_response, sizeof(s_last_response), "IO:CLOCK");
+            return false;
+        }
+
+        bool saw_boot_banner = false;
+
+        while (1) {
+            struct timespec now_ts;
+            if (clock_gettime(CLOCK_MONOTONIC, &now_ts) != 0) {
+                snprintf(s_last_response, sizeof(s_last_response), "IO:CLOCK");
                 return false;
             }
-        } else {
-            fprintf(stderr, "[serial] read failed: %s\n", strerror(errno));
-            return false;
+
+            long elapsed_ms = (now_ts.tv_sec - start_ts.tv_sec) * 1000L
+                            + (now_ts.tv_nsec - start_ts.tv_nsec) / 1000000L;
+            long remaining_ms = ack_timeout_ms - elapsed_ms;
+            if (remaining_ms <= 0) {
+                if (saw_boot_banner && attempt == 0) {
+                    fprintf(stderr, "[serial] command likely lost during MCU reset, waiting then retrying once\n");
+                    tcflush(s_serial_fd, TCIFLUSH);
+                    usleep(1200000);
+                    break;
+                }
+                fprintf(stderr, "[serial] timeout waiting for dispense response\n");
+                snprintf(s_last_response, sizeof(s_last_response), "TIMEOUT");
+                return false;
+            }
+
+            char response[96];
+            if (!serial_read_line_with_timeout(response, sizeof(response), (int)remaining_ms)) {
+                if (saw_boot_banner && attempt == 0) {
+                    fprintf(stderr, "[serial] command likely lost during MCU reset, waiting then retrying once\n");
+                    tcflush(s_serial_fd, TCIFLUSH);
+                    usleep(1200000);
+                    break;
+                }
+                fprintf(stderr, "[serial] timeout waiting for dispense response\n");
+                snprintf(s_last_response, sizeof(s_last_response), "TIMEOUT");
+                return false;
+            }
+
+            // If the line contains a known token after leading noise, re-anchor to it.
+            char *started = strstr(response, "STARTED:");
+            char *error = strstr(response, "ERROR:");
+            char *rfid = strstr(response, "RFID:");
+            char *ready = strstr(response, "READY");
+            char *nfc = strstr(response, "NFC:NO_SHIELD");
+            char *resetCause = strstr(response, "RESET_CAUSE:");
+            char *progress = strstr(response, "PROGRESS:");
+            char *ok = strstr(response, "OK:");
+            char *stopped = strstr(response, "STOPPED:");
+
+            const char *line = response;
+            if (started) line = started;
+            else if (error) line = error;
+            else if (rfid) line = rfid;
+            else if (resetCause) line = resetCause;
+            else if (nfc) line = nfc;
+            else if (ready) line = ready;
+            else if (progress) line = progress;
+            else if (ok) line = ok;
+            else if (stopped) line = stopped;
+
+            fprintf(stderr, "[serial] response: %s\n", line);
+
+            if (strncmp(line, "STARTED:", 8) == 0) {
+                snprintf(s_last_response, sizeof(s_last_response), "%s", line);
+                return true;
+            }
+
+            if (strncmp(line, "ERROR:", 6) == 0) {
+                snprintf(s_last_response, sizeof(s_last_response), "%s", line);
+                fprintf(stderr, "[serial] dispense rejected: %s\n", line);
+                return false;
+            }
+
+            if (rfid || ready || nfc || resetCause || progress || ok || stopped) {
+                if (ready || nfc || resetCause)
+                    saw_boot_banner = true;
+                fprintf(stderr, "[serial] ignoring unsolicited line: %s\n", line);
+                continue;
+            }
+
+            fprintf(stderr, "[serial] unexpected response: %s\n", line);
+            // Keep waiting: spurious noise should not fail command immediately.
         }
     }
 
+    fprintf(stderr, "[serial] timeout waiting for dispense response\n");
+    snprintf(s_last_response, sizeof(s_last_response), "TIMEOUT");
     return false;
 }
 
 bool serial_comm_send_stop(void)
 {
-    if (s_serial_fd < 0 && !serial_comm_init()) {
+    if (!serial_ensure_connected()) {
         return false;
     }
 
@@ -206,28 +436,46 @@ bool serial_comm_send_stop(void)
     ssize_t written = write(s_serial_fd, cmd, 5);
     if (written != 5) {
         fprintf(stderr, "[serial] STOP write failed: %s\n", strerror(errno));
+        if (serial_is_disconnect_errno(errno)) {
+            serial_mark_disconnected();
+        }
         return false;
     }
-    tcdrain(s_serial_fd);
+    if (tcdrain(s_serial_fd) != 0 && serial_is_disconnect_errno(errno)) {
+        serial_mark_disconnected();
+    }
     fprintf(stderr, "[serial] STOP sent\n");
     return true;
 }
 
 bool serial_comm_read_rfid(char *tag_out, size_t tag_len)
 {
-    if (!tag_out || tag_len == 0 || s_serial_fd < 0) return false;
+    if (!tag_out || tag_len == 0) return false;
+    if (!serial_ensure_connected()) return false;
 
     /* Non-blocking check: return immediately if no bytes are waiting */
     fd_set readfds;
     struct timeval tv = {0, 0};
     FD_ZERO(&readfds);
     FD_SET(s_serial_fd, &readfds);
-    if (select(s_serial_fd + 1, &readfds, NULL, NULL, &tv) <= 0) return false;
+    int sret = select(s_serial_fd + 1, &readfds, NULL, NULL, &tv);
+    if (sret < 0) {
+        if (serial_is_disconnect_errno(errno)) {
+            serial_mark_disconnected();
+        }
+        return false;
+    }
+    if (sret == 0) return false;
 
     ssize_t n = read(s_serial_fd,
                      s_rx_buf + s_rx_len,
                      (sizeof(s_rx_buf) - 1) - (size_t)s_rx_len);
-    if (n <= 0) return false;
+    if (n <= 0) {
+        if (n == 0 || serial_is_disconnect_errno(errno)) {
+            serial_mark_disconnected();
+        }
+        return false;
+    }
     s_rx_len += (int)n;
     s_rx_buf[s_rx_len] = '\0';
 
@@ -239,9 +487,20 @@ bool serial_comm_read_rfid(char *tag_out, size_t tag_len)
         int len = (int)(nl - p);
         if (len > 0 && p[len - 1] == '\r') { p[--len] = '\0'; }
 
-        if (strncmp(p, "RFID:", 5) == 0 && len > 5) {
-            strncpy(tag_out, p + 5, tag_len - 1);
+        char *rfid = strstr(p, "RFID:");
+        char *nfc = strstr(p, "NFC:");
+        char *ready = strstr(p, "READY");
+        char *resetCause = strstr(p, "RESET_CAUSE:");
+        char *started = strstr(p, "STARTED:");
+        char *err = strstr(p, "ERROR:");
+        char *progress = strstr(p, "PROGRESS:");
+        char *ok = strstr(p, "OK:");
+        char *stopped = strstr(p, "STOPPED:");
+
+        if (rfid && strlen(rfid) > 5) {
+            strncpy(tag_out, rfid + 5, tag_len - 1);
             tag_out[tag_len - 1] = '\0';
+            fprintf(stderr, "[serial] rfid tag: %s\n", tag_out);
             /* Shift the rest of the buffer down */
             char *next = nl + 1;
             int rem = (int)(s_rx_buf + s_rx_len - next);
@@ -250,6 +509,20 @@ bool serial_comm_read_rfid(char *tag_out, size_t tag_len)
             s_rx_buf[s_rx_len] = '\0';
             return true;
         }
+
+        if (nfc || ready || resetCause || started || err || progress || ok || stopped) {
+            const char *line = p;
+            if (resetCause) line = resetCause;
+            else if (nfc) line = nfc;
+            else if (ready) line = ready;
+            else if (started) line = started;
+            else if (err) line = err;
+            else if (progress) line = progress;
+            else if (ok) line = ok;
+            else if (stopped) line = stopped;
+            fprintf(stderr, "[serial] telemetry: %s\n", line);
+        }
+
         p = nl + 1;   /* discard non-RFID line, keep scanning */
     }
 

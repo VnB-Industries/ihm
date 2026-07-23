@@ -17,6 +17,8 @@
 extern "C" {
 #endif
 
+#include <stdint.h>
+
 typedef enum {
     SCREEN_HOME = 0,
     SCREEN_PROFILE_SELECT,

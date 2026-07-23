@@ -86,6 +86,7 @@ static uint32_t    s_params_rfid_deadline   = 0;
 
 static void on_delete_user(lv_event_t *e);
 static void stop_purge(void);static void on_params_enrollment_result(rfid_enroll_result_t result);
+static void on_admin_toggle(lv_event_t *e);
 static void on_rfid_badge_btn(lv_event_t *e);
 /* ── PIN helpers ────────────────────────────────────────────────────────── */
 
@@ -110,7 +111,7 @@ static void refresh_user_list(void)
 
     for (int i = 0; i < count; i++) {
         lv_obj_t *row = lv_obj_create(s_user_list);
-        lv_obj_set_size(row, SCREEN_INNER_W - 28, 48);
+        lv_obj_set_size(row, SCREEN_INNER_W - 28, 56);
         lv_obj_set_style_bg_color(row, lv_color_hex(0x0F3460), LV_PART_MAIN);
         lv_obj_set_style_border_width(row, 0, LV_PART_MAIN);
         lv_obj_set_style_radius(row, 6, LV_PART_MAIN);
@@ -127,6 +128,19 @@ static void refresh_user_list(void)
         lv_label_set_text(lbl, users[i].name);
         lv_obj_set_style_text_color(lbl, lv_color_hex(0xEAEAEA), LV_PART_MAIN);
         lv_obj_set_flex_grow(lbl, 1);
+
+        lv_obj_t *admin_btn = lv_btn_create(row);
+        lv_obj_set_size(admin_btn, 120, 36);
+        lv_obj_set_style_bg_color(admin_btn,
+            users[i].is_admin ? lv_color_hex(0x00C853) : lv_color_hex(0x444444),
+            LV_PART_MAIN);
+        lv_obj_set_style_radius(admin_btn, 6, LV_PART_MAIN);
+        lv_obj_add_event_cb(admin_btn, on_admin_toggle, LV_EVENT_CLICKED,
+                            (void *)(intptr_t)users[i].id);
+        lv_obj_t *admin_lbl = lv_label_create(admin_btn);
+        lv_label_set_text(admin_lbl,
+            users[i].is_admin ? "ADMIN" : "Utilisateur");
+        lv_obj_center(admin_lbl);
 
         /* Badge link/unlink button */
         bool has_badge = (users[i].rfid_tag[0] != '\0');
@@ -403,6 +417,18 @@ static void on_delete_user(lv_event_t *e)
     lv_obj_move_foreground(s_delete_popup);
 }
 
+static void on_admin_toggle(lv_event_t *e)
+{
+    int uid = (int)(intptr_t)lv_event_get_user_data(e);
+    user_record_t user;
+    if (db_get_user(uid, &user) != 0)
+        return;
+
+    user.is_admin = !user.is_admin;
+    if (db_update_user(&user) == 0)
+        refresh_user_list();
+}
+
 static void on_delete_confirmed(lv_event_t *e)
 {
     (void)e;
@@ -575,7 +601,11 @@ static void on_purge_start_clicked(lv_event_t *e)
     int p2 = (s_purge_pump_sel == 1 || s_purge_pump_sel == 2) ? 999 : 0;
 
     if (!serial_comm_send_dispense_cl(p1, p2)) {
-        lv_label_set_text(s_purge_lbl_status, LV_SYMBOL_WARNING " Erreur serie");
+        const char *resp = serial_comm_last_response();
+        if (resp && strcmp(resp, "ERROR:NO_OBJECT") == 0)
+            lv_label_set_text(s_purge_lbl_status, LV_SYMBOL_WARNING " Aucun verre detecte");
+        else
+            lv_label_set_text(s_purge_lbl_status, LV_SYMBOL_WARNING " Erreur serie");
         lv_obj_set_style_text_color(s_purge_lbl_status,
                                     lv_color_hex(0xE94560), LV_PART_MAIN);
         return;
@@ -1052,6 +1082,11 @@ void scr_parameters_init(void)
 }
 
 lv_obj_t *scr_parameters_get(void) { return s_screen; }
+
+void scr_parameters_unlock_admin(void)
+{
+    show_config_phase();
+}
 
 void scr_parameters_refresh(void)
 {

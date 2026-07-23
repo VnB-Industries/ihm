@@ -14,6 +14,7 @@ extern "C" {
 typedef struct {
     int     id;
     char    name[GAME_DB_NAME_LEN];
+    bool    is_admin;          /* true when this user may unlock settings by RFID */
     int     bonus;             /* active bonus  - shifts wheel values down */
     int     malus;             /* active malus  - shifts wheel values up   */
     int     wheel_trigger;     /* bonus-wheel appearance counter            */

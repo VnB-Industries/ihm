@@ -2,6 +2,7 @@
 #define SERIAL_COMM_H
 
 #include <stdbool.h>
+#include <stddef.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -18,6 +19,10 @@ bool serial_comm_send_dispense_cl(int pump1_cl, int pump2_cl);
 
 /* Send STOP command to immediately abort an in-progress dispense. */
 bool serial_comm_send_stop(void);
+
+/* Get last command response/status captured by serial_comm.
+ * Examples: STARTED:..., ERROR:NO_OBJECT, ERROR:TIMEOUT, IO:WRITE, TIMEOUT */
+const char *serial_comm_last_response(void);
 
 /* Non-blocking RFID tag poll.
  * Returns true and fills tag_out with a NUL-terminated uppercase hex UID

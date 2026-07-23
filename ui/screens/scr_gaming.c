@@ -6,6 +6,7 @@
 #include "serial_comm.h"
 #include <time.h>
 #include <stdio.h>
+#include <string.h>
 #if LV_USE_LOTTIE
 #include <libgen.h>
 #include <unistd.h>
@@ -181,7 +182,16 @@ static void on_wheel_result(lv_obj_t *wf, uint16_t seg_index,
         pump2_cl = 0;
     }
 
-    (void)serial_comm_send_dispense_cl(pump1_cl, pump2_cl);
+    if (!serial_comm_send_dispense_cl(pump1_cl, pump2_cl)) {
+        const char *resp = serial_comm_last_response();
+        if (resp && strcmp(resp, "ERROR:NO_OBJECT") == 0) {
+            lv_label_set_text(s_result_label, LV_SYMBOL_WARNING " Place le verre puis reessaye");
+        } else {
+            lv_label_set_text(s_result_label, LV_SYMBOL_WARNING " Distribution refusee");
+        }
+        set_spin_btn_enabled(true);
+        return;
+    }
 
     char buf[48];
     lv_snprintf(buf, sizeof(buf),

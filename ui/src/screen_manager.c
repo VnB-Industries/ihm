@@ -129,10 +129,15 @@ static void rfid_tick(lv_timer_t *t)
 
     /* ── Normal dispatch ── */
     if (!got_tag) return;
-    if (s_current == SCREEN_PARAMETERS) return;   /* admin screen — ignore */
 
     user_record_t u;
     if (db_get_user_by_rfid(tag, &u) != 0) return;  /* unknown tag */
+
+    if (s_current == SCREEN_PARAMETERS) {
+        if (u.is_admin)
+            scr_parameters_unlock_admin();
+        return;
+    }
 
     game_set_active_user(u.id);
     screen_manager_load(SCREEN_GLASS_SELECT);

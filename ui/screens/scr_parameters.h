@@ -10,6 +10,7 @@ extern "C" {
 void      scr_parameters_init(void);
 lv_obj_t *scr_parameters_get(void);
 void      scr_parameters_refresh(void); /* reset to PIN phase */
+void      scr_parameters_unlock_admin(void);
 
 #ifdef __cplusplus
 }
