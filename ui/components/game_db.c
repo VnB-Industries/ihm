@@ -110,7 +110,9 @@ int db_init(const char *path)
         "  ('max_bonus_stack',                   5),"
         "  ('max_malus_stack',                   5),"
         "  ('spin_cooldown_seconds',             0),"
-        "  ('timeout_modifier_minutes',          5);"
+        "  ('timeout_modifier_minutes',          5),"
+        "  ('pump1_pulses_per_cl_x1000',    540420),"
+        "  ('pump2_flow_clps_x1000',          2800);"
     );
 
     exec_sql(

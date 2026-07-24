@@ -15,6 +15,26 @@
 #define IHM_DB_PATH "./game.db"
 #endif
 
+static void sync_flow_constants_from_db(void)
+{
+    int pump1_scaled = db_get_config("pump1_pulses_per_cl_x1000", 540420);
+    int pump2_scaled = db_get_config("pump2_flow_clps_x1000", 2800);
+
+    if (pump1_scaled <= 0) {
+        pump1_scaled = 540420;
+    }
+    if (pump2_scaled <= 0) {
+        pump2_scaled = 2800;
+    }
+
+    float pump1 = pump1_scaled / 1000.0f;
+    float pump2 = pump2_scaled / 1000.0f;
+    if (!serial_comm_set_flow_constants(pump1, pump2)) {
+        fprintf(stderr, "[serial] flow constants sync failed: %s\n",
+                serial_comm_last_response());
+    }
+}
+
 int main(void)
 {
     lv_init();
@@ -30,6 +50,8 @@ int main(void)
     if(!serial_comm_init()) {
         /* Keep the UI running even when the microcontroller link is unavailable. */
         fprintf(stderr, "[serial] startup without USB serial link\n");
+    } else {
+        sync_flow_constants_from_db();
     }
 
     screen_manager_init();

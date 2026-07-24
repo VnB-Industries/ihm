@@ -16,7 +16,7 @@ Application IHM de jeu de boisson basee sur LVGL v9.
 | Roue bonus | Bonus / Malus / +Temps / -Temps / Rien |
 | Donner modificateur | Attribution du bonus/malus gagne |
 | Classement | Joueur / Total cL / Bonus / Malus / A donne a |
-| Parametres | Acces PIN (2106), configuration complete |
+| Parametres | Acces PIN (2106), configuration complete + calibration pompes |
 
 ## Mecanique de jeu
 
@@ -40,6 +40,54 @@ Application IHM de jeu de boisson basee sur LVGL v9.
 | `max_bonus_stack` | 5 | Empilement max de bonus |
 | `max_malus_stack` | 5 | Empilement max de malus |
 | `spin_cooldown_seconds` | 0 | Cooldown entre deux spins (secondes) |
+| `pump1_pulses_per_cl_x1000` | 540420 | Constante pompe 1 (pulses/cL) en fixe x1000 |
+| `pump2_flow_clps_x1000` | 2800 | Constante pompe 2 (cL/s) en fixe x1000 |
+
+## Calibration pompes
+
+Un onglet Calibration est disponible dans Parametres.
+
+Workflow operateur:
+
+1. Selectionner la pompe 1 ou 2.
+2. Entrer la quantite cible en cL.
+3. Appuyer sur Demarrer.
+4. Quand la quantite est atteinte dans le verre, retirer le verre du capteur de presence.
+5. Le firmware stoppe la pompe, calcule la constante, puis renvoie la valeur finale.
+6. L'IHM enregistre la constante en base et tente de la synchroniser immediatement vers le controleur.
+
+Comportement Reset:
+
+- Le bouton reset de calibration remet uniquement la pompe selectionnee a sa valeur par defaut.
+- Les autres reglages restent inchanges.
+
+Formules appliquees:
+
+- Pompe 1: `pulsesPerCl = pulseCount / quantite_cL`
+- Pompe 2: `flowClPerSec = quantite_cL / duree_secondes`
+
+Source de verite:
+
+- La base SQLite de l'IHM est la source de verite des constantes.
+- Au demarrage, l'IHM envoie les constantes au microcontroleur via `SETFLOW`.
+- Le microcontroleur applique ces valeurs en runtime (pas de persistance EEPROM dans cette version).
+
+## Protocole serie: extensions calibration
+
+Commandes IHM vers controleur:
+
+- `CAL:<pump_index>:<quantity_cL>`
+- `SETFLOW:<p1_pulses_per_cL>:<p2_cL_per_s>`
+- `STOP` (interrompt aussi une calibration en cours)
+
+Reponses controleur vers IHM:
+
+- `CAL:STARTED:<pump_index>:<quantity_cL>`
+- `PROGRESS:<p1_mesure_ou_calcule>:<p2_estime_ou_calcule>`
+- `CAL:STOPPED_BY_SENSOR:<p1_pulses_per_cL>:<p2_cL_per_s>`
+- `CAL:STOPPED:<p1_pulses_per_cL>:<p2_cL_per_s>`
+- `SETFLOW:OK:<p1_pulses_per_cL>:<p2_cL_per_s>`
+- `ERROR:INVALID_CALIBRATION`, `ERROR:INVALID_CONSTANTS`, `ERROR:NO_OBJECT`, etc.
 
 ## Architecture
 

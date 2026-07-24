@@ -47,6 +47,7 @@ static int        s_enroll_uid      = -1;
 static uint32_t   s_enroll_deadline = 0;
 static void     (*s_enroll_cb)(rfid_enroll_result_t) = NULL;
 static lv_timer_t *s_rfid_timer = NULL;
+static bool s_rfid_poll_enabled = true;
 
 static void inactivity_reset(void)
 {
@@ -94,6 +95,10 @@ static void inactivity_timer_cb(lv_timer_t *t)
 static void rfid_tick(lv_timer_t *t)
 {
     (void)t;
+
+    if (!s_rfid_poll_enabled) {
+        return;
+    }
 
     char tag[32];
     bool got_tag = serial_comm_read_rfid(tag, sizeof(tag));
@@ -200,4 +205,9 @@ void screen_manager_rfid_enroll_cancel(void)
 {
     s_enroll_uid = -1;
     s_enroll_cb  = NULL;
+}
+
+void screen_manager_set_rfid_poll_enabled(bool enabled)
+{
+    s_rfid_poll_enabled = enabled;
 }

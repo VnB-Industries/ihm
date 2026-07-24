@@ -99,6 +99,109 @@ static bool serial_ensure_connected(void)
     return serial_comm_init();
 }
 
+static bool serial_parse_two_floats(const char *line, const char *prefix,
+                                    float *v1_out, float *v2_out)
+{
+    if (!line || !prefix || !v1_out || !v2_out) {
+        return false;
+    }
+
+    size_t n = strlen(prefix);
+    if (strncmp(line, prefix, n) != 0) {
+        return false;
+    }
+
+    float v1 = 0.0f;
+    float v2 = 0.0f;
+    if (sscanf(line + n, "%f:%f", &v1, &v2) != 2) {
+        return false;
+    }
+
+    *v1_out = v1;
+    *v2_out = v2;
+    return true;
+}
+
+/* Read one newline-terminated line without blocking.
+ * Returns true when a full line is available. */
+static bool serial_read_next_line_nonblocking(char *out, size_t out_len)
+{
+    if (!out || out_len == 0) {
+        return false;
+    }
+
+    out[0] = '\0';
+    if (!serial_ensure_connected()) {
+        return false;
+    }
+
+    char *nl = memchr(s_rx_buf, '\n', (size_t)s_rx_len);
+    if (!nl) {
+        fd_set readfds;
+        struct timeval tv = {0, 0};
+        FD_ZERO(&readfds);
+        FD_SET(s_serial_fd, &readfds);
+
+        int sret = select(s_serial_fd + 1, &readfds, NULL, NULL, &tv);
+        if (sret < 0) {
+            if (serial_is_disconnect_errno(errno)) {
+                serial_mark_disconnected();
+            }
+            return false;
+        }
+
+        if (sret == 0) {
+            return false;
+        }
+
+        ssize_t n = read(s_serial_fd,
+                         s_rx_buf + s_rx_len,
+                         (sizeof(s_rx_buf) - 1) - (size_t)s_rx_len);
+        if (n <= 0) {
+            if (n == 0 || serial_is_disconnect_errno(errno)) {
+                serial_mark_disconnected();
+            }
+            return false;
+        }
+
+        s_rx_len += (int)n;
+        s_rx_buf[s_rx_len] = '\0';
+        nl = memchr(s_rx_buf, '\n', (size_t)s_rx_len);
+    }
+
+    if (!nl) {
+        if (s_rx_len >= (int)(sizeof(s_rx_buf) - 1)) {
+            s_rx_len = 0;
+            s_rx_buf[0] = '\0';
+        }
+        return false;
+    }
+
+    int line_len = (int)(nl - s_rx_buf);
+    if (line_len > 0 && s_rx_buf[line_len - 1] == '\r') {
+        line_len--;
+    }
+    if (line_len < 0) {
+        line_len = 0;
+    }
+
+    size_t copy_len = (size_t)line_len;
+    if (copy_len >= out_len) {
+        copy_len = out_len - 1;
+    }
+    memcpy(out, s_rx_buf, copy_len);
+    out[copy_len] = '\0';
+
+    char *next = nl + 1;
+    int rem = (int)(s_rx_buf + s_rx_len - next);
+    if (rem > 0) {
+        memmove(s_rx_buf, next, (size_t)rem);
+    }
+    s_rx_len = rem;
+    s_rx_buf[s_rx_len] = '\0';
+    return true;
+}
+
 /* Read one newline-terminated line with timeout into out.
  * Returns true when a full line is read, false on timeout/error. */
 static bool serial_read_line_with_timeout(char *out, size_t out_len, int timeout_ms)
@@ -384,6 +487,10 @@ bool serial_comm_send_dispense_cl(int pump1_cl, int pump2_cl)
             char *progress = strstr(response, "PROGRESS:");
             char *ok = strstr(response, "OK:");
             char *stopped = strstr(response, "STOPPED:");
+            char *calStarted = strstr(response, "CAL:STARTED");
+            char *calStopped = strstr(response, "CAL:STOPPED");
+            char *calStoppedBySensor = strstr(response, "CAL:STOPPED_BY_SENSOR:");
+            char *setflowOk = strstr(response, "SETFLOW:OK:");
 
             const char *line = response;
             if (started) line = started;
@@ -395,6 +502,10 @@ bool serial_comm_send_dispense_cl(int pump1_cl, int pump2_cl)
             else if (progress) line = progress;
             else if (ok) line = ok;
             else if (stopped) line = stopped;
+            else if (calStarted) line = calStarted;
+            else if (calStoppedBySensor) line = calStoppedBySensor;
+            else if (calStopped) line = calStopped;
+            else if (setflowOk) line = setflowOk;
 
             fprintf(stderr, "[serial] response: %s\n", line);
 
@@ -409,7 +520,8 @@ bool serial_comm_send_dispense_cl(int pump1_cl, int pump2_cl)
                 return false;
             }
 
-            if (rfid || ready || nfc || resetCause || progress || ok || stopped) {
+            if (rfid || ready || nfc || resetCause || progress || ok || stopped
+                    || calStarted || calStoppedBySensor || calStopped || setflowOk) {
                 if (ready || nfc || resetCause)
                     saw_boot_banner = true;
                 fprintf(stderr, "[serial] ignoring unsolicited line: %s\n", line);
@@ -448,92 +560,285 @@ bool serial_comm_send_stop(void)
     return true;
 }
 
-bool serial_comm_read_rfid(char *tag_out, size_t tag_len)
+bool serial_comm_set_flow_constants(float pump1_pulses_per_cl,
+                                    float pump2_flow_cl_per_sec)
 {
-    if (!tag_out || tag_len == 0) return false;
-    if (!serial_ensure_connected()) return false;
+    s_last_response[0] = '\0';
 
-    /* Non-blocking check: return immediately if no bytes are waiting */
-    fd_set readfds;
-    struct timeval tv = {0, 0};
-    FD_ZERO(&readfds);
-    FD_SET(s_serial_fd, &readfds);
-    int sret = select(s_serial_fd + 1, &readfds, NULL, NULL, &tv);
-    if (sret < 0) {
-        if (serial_is_disconnect_errno(errno)) {
-            serial_mark_disconnected();
-        }
+    if (pump1_pulses_per_cl <= 0.0f || pump2_flow_cl_per_sec <= 0.0f) {
+        snprintf(s_last_response, sizeof(s_last_response), "ERROR:INVALID_CONSTANTS");
         return false;
     }
-    if (sret == 0) return false;
 
-    ssize_t n = read(s_serial_fd,
-                     s_rx_buf + s_rx_len,
-                     (sizeof(s_rx_buf) - 1) - (size_t)s_rx_len);
-    if (n <= 0) {
-        if (n == 0 || serial_is_disconnect_errno(errno)) {
-            serial_mark_disconnected();
-        }
+    if (!serial_ensure_connected()) {
+        snprintf(s_last_response, sizeof(s_last_response), "IO:INIT");
         return false;
     }
-    s_rx_len += (int)n;
-    s_rx_buf[s_rx_len] = '\0';
 
-    /* Scan for complete newline-terminated lines */
-    char *p = s_rx_buf;
-    char *nl;
-    while ((nl = memchr(p, '\n', (size_t)(s_rx_buf + s_rx_len - p))) != NULL) {
-        *nl = '\0';
-        int len = (int)(nl - p);
-        if (len > 0 && p[len - 1] == '\r') { p[--len] = '\0'; }
+    tcflush(s_serial_fd, TCIFLUSH);
+    s_rx_len = 0;
+    s_rx_buf[0] = '\0';
 
-        char *rfid = strstr(p, "RFID:");
-        char *nfc = strstr(p, "NFC:");
-        char *ready = strstr(p, "READY");
-        char *resetCause = strstr(p, "RESET_CAUSE:");
-        char *started = strstr(p, "STARTED:");
-        char *err = strstr(p, "ERROR:");
-        char *progress = strstr(p, "PROGRESS:");
-        char *ok = strstr(p, "OK:");
-        char *stopped = strstr(p, "STOPPED:");
+    char command[96];
+    int n = snprintf(command, sizeof(command), "SETFLOW:%.3f:%.3f\n",
+                     pump1_pulses_per_cl, pump2_flow_cl_per_sec);
+    if (n < 0 || n >= (int)sizeof(command)) {
+        snprintf(s_last_response, sizeof(s_last_response), "IO:FORMAT");
+        return false;
+    }
 
-        if (rfid && strlen(rfid) > 5) {
-            strncpy(tag_out, rfid + 5, tag_len - 1);
-            tag_out[tag_len - 1] = '\0';
-            fprintf(stderr, "[serial] rfid tag: %s\n", tag_out);
-            /* Shift the rest of the buffer down */
-            char *next = nl + 1;
-            int rem = (int)(s_rx_buf + s_rx_len - next);
-            if (rem > 0) memmove(s_rx_buf, next, (size_t)rem);
-            s_rx_len = rem;
-            s_rx_buf[s_rx_len] = '\0';
+    for (int attempt = 0; attempt < 2; attempt++) {
+        const long ack_timeout_ms = (attempt == 0) ? 2000L : 3500L;
+        bool saw_boot_banner = false;
+
+        if (write(s_serial_fd, command, (size_t)n) != n) {
+            snprintf(s_last_response, sizeof(s_last_response), "IO:WRITE");
+            return false;
+        }
+
+        if (tcdrain(s_serial_fd) != 0) {
+            snprintf(s_last_response, sizeof(s_last_response), "IO:DRAIN");
+            return false;
+        }
+
+        struct timespec start_ts;
+        if (clock_gettime(CLOCK_MONOTONIC, &start_ts) != 0) {
+            snprintf(s_last_response, sizeof(s_last_response), "IO:CLOCK");
+            return false;
+        }
+
+        while (1) {
+            struct timespec now_ts;
+            if (clock_gettime(CLOCK_MONOTONIC, &now_ts) != 0) {
+                snprintf(s_last_response, sizeof(s_last_response), "IO:CLOCK");
+                return false;
+            }
+
+            long elapsed_ms = (now_ts.tv_sec - start_ts.tv_sec) * 1000L
+                            + (now_ts.tv_nsec - start_ts.tv_nsec) / 1000000L;
+            long remaining_ms = ack_timeout_ms - elapsed_ms;
+            if (remaining_ms <= 0) {
+                if (saw_boot_banner && attempt == 0) {
+                    tcflush(s_serial_fd, TCIFLUSH);
+                    usleep(1200000);
+                    break;
+                }
+                snprintf(s_last_response, sizeof(s_last_response), "TIMEOUT");
+                return false;
+            }
+
+            char response[96];
+            if (!serial_read_line_with_timeout(response, sizeof(response), (int)remaining_ms)) {
+                if (saw_boot_banner && attempt == 0) {
+                    tcflush(s_serial_fd, TCIFLUSH);
+                    usleep(1200000);
+                    break;
+                }
+                snprintf(s_last_response, sizeof(s_last_response), "TIMEOUT");
+                return false;
+            }
+
+            char *ok = strstr(response, "SETFLOW:OK:");
+            char *err = strstr(response, "ERROR:");
+            char *ready = strstr(response, "READY");
+            char *resetCause = strstr(response, "RESET_CAUSE:");
+            char *nfc = strstr(response, "NFC:");
+
+            const char *line = ok ? ok : (err ? err : response);
+            if (ok) {
+                snprintf(s_last_response, sizeof(s_last_response), "%s", line);
+                return true;
+            }
+            if (err) {
+                snprintf(s_last_response, sizeof(s_last_response), "%s", line);
+                return false;
+            }
+            if (ready || resetCause || nfc) {
+                saw_boot_banner = true;
+            }
+            fprintf(stderr, "[serial] ignoring unsolicited line: %s\n", response);
+        }
+    }
+
+    snprintf(s_last_response, sizeof(s_last_response), "TIMEOUT");
+    return false;
+}
+
+bool serial_comm_start_calibration(int pump_index, float quantity_cl)
+{
+    s_last_response[0] = '\0';
+
+    if ((pump_index != 1 && pump_index != 2) || quantity_cl <= 0.0f) {
+        snprintf(s_last_response, sizeof(s_last_response), "ERROR:INVALID_CALIBRATION");
+        return false;
+    }
+
+    if (!serial_ensure_connected()) {
+        snprintf(s_last_response, sizeof(s_last_response), "IO:INIT");
+        return false;
+    }
+
+    tcflush(s_serial_fd, TCIFLUSH);
+    s_rx_len = 0;
+    s_rx_buf[0] = '\0';
+
+    char command[64];
+    int n = snprintf(command, sizeof(command), "CAL:%d:%.3f\n", pump_index, quantity_cl);
+    if (n < 0 || n >= (int)sizeof(command)) {
+        snprintf(s_last_response, sizeof(s_last_response), "IO:FORMAT");
+        return false;
+    }
+
+    if (write(s_serial_fd, command, (size_t)n) != n) {
+        snprintf(s_last_response, sizeof(s_last_response), "IO:WRITE");
+        return false;
+    }
+
+    if (tcdrain(s_serial_fd) != 0) {
+        snprintf(s_last_response, sizeof(s_last_response), "IO:DRAIN");
+        return false;
+    }
+
+    struct timespec start_ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &start_ts) != 0) {
+        snprintf(s_last_response, sizeof(s_last_response), "IO:CLOCK");
+        return false;
+    }
+
+    while (1) {
+        struct timespec now_ts;
+        if (clock_gettime(CLOCK_MONOTONIC, &now_ts) != 0) {
+            snprintf(s_last_response, sizeof(s_last_response), "IO:CLOCK");
+            return false;
+        }
+
+        long elapsed_ms = (now_ts.tv_sec - start_ts.tv_sec) * 1000L
+                        + (now_ts.tv_nsec - start_ts.tv_nsec) / 1000000L;
+        long remaining_ms = 3000L - elapsed_ms;
+        if (remaining_ms <= 0) {
+            snprintf(s_last_response, sizeof(s_last_response), "TIMEOUT");
+            return false;
+        }
+
+        char response[96];
+        if (!serial_read_line_with_timeout(response, sizeof(response), (int)remaining_ms)) {
+            snprintf(s_last_response, sizeof(s_last_response), "TIMEOUT");
+            return false;
+        }
+
+        char *started = strstr(response, "CAL:STARTED:");
+        char *err = strstr(response, "ERROR:");
+        char *rfid = strstr(response, "RFID:");
+        char *ready = strstr(response, "READY");
+        char *nfc = strstr(response, "NFC:");
+        char *resetCause = strstr(response, "RESET_CAUSE:");
+        char *progress = strstr(response, "PROGRESS:");
+
+        const char *line = started ? started :
+                           (err ? err :
+                           (rfid ? rfid :
+                           (resetCause ? resetCause :
+                           (nfc ? nfc :
+                           (ready ? ready :
+                           (progress ? progress : response))))));
+
+        if (started) {
+            snprintf(s_last_response, sizeof(s_last_response), "%s", line);
             return true;
         }
 
-        if (nfc || ready || resetCause || started || err || progress || ok || stopped) {
-            const char *line = p;
-            if (resetCause) line = resetCause;
-            else if (nfc) line = nfc;
-            else if (ready) line = ready;
-            else if (started) line = started;
-            else if (err) line = err;
-            else if (progress) line = progress;
-            else if (ok) line = ok;
-            else if (stopped) line = stopped;
-            fprintf(stderr, "[serial] telemetry: %s\n", line);
+        if (err) {
+            snprintf(s_last_response, sizeof(s_last_response), "%s", line);
+            return false;
         }
 
-        p = nl + 1;   /* discard non-RFID line, keep scanning */
+        fprintf(stderr, "[serial] ignoring unsolicited line: %s\n", line);
+    }
+}
+
+bool serial_comm_read_calibration_event(serial_calibration_event_t *out)
+{
+    if (!out) {
+        return false;
     }
 
-    /* Compact: drop fully-scanned non-RFID lines */
-    if (p > s_rx_buf) {
-        int rem = (int)(s_rx_buf + s_rx_len - p);
-        if (rem > 0) memmove(s_rx_buf, p, (size_t)rem);
-        s_rx_len = rem;
-        s_rx_buf[s_rx_len] = '\0';
+    char line[96];
+    while (serial_read_next_line_nonblocking(line, sizeof(line))) {
+        float v1 = 0.0f;
+        float v2 = 0.0f;
+
+        if (serial_parse_two_floats(line, "PROGRESS:", &v1, &v2)) {
+            out->type = SERIAL_CAL_EVENT_PROGRESS;
+            out->pump1_value = v1;
+            out->pump2_value = v2;
+            snprintf(out->raw_line, sizeof(out->raw_line), "%s", line);
+            return true;
+        }
+
+        if (serial_parse_two_floats(line, "CAL:STOPPED_BY_SENSOR:", &v1, &v2)) {
+            out->type = SERIAL_CAL_EVENT_STOPPED_BY_SENSOR;
+            out->pump1_value = v1;
+            out->pump2_value = v2;
+            snprintf(out->raw_line, sizeof(out->raw_line), "%s", line);
+            return true;
+        }
+
+        if (serial_parse_two_floats(line, "CAL:STOPPED:", &v1, &v2)) {
+            out->type = SERIAL_CAL_EVENT_STOPPED;
+            out->pump1_value = v1;
+            out->pump2_value = v2;
+            snprintf(out->raw_line, sizeof(out->raw_line), "%s", line);
+            return true;
+        }
+
+        if (strncmp(line, "CAL:STARTED:", 12) == 0) {
+            out->type = SERIAL_CAL_EVENT_STARTED;
+            out->pump1_value = 0.0f;
+            out->pump2_value = 0.0f;
+            snprintf(out->raw_line, sizeof(out->raw_line), "%s", line);
+            return true;
+        }
+
+        if (strncmp(line, "ERROR:", 6) == 0) {
+            out->type = SERIAL_CAL_EVENT_ERROR;
+            out->pump1_value = 0.0f;
+            out->pump2_value = 0.0f;
+            snprintf(out->raw_line, sizeof(out->raw_line), "%s", line);
+            snprintf(s_last_response, sizeof(s_last_response), "%s", line);
+            return true;
+        }
+
+        if (strncmp(line, "RFID:", 5) == 0 || strncmp(line, "READY", 5) == 0
+                || strncmp(line, "NFC:", 4) == 0 || strncmp(line, "RESET_CAUSE:", 12) == 0
+                || strncmp(line, "STARTED:", 8) == 0 || strncmp(line, "STOPPED:", 8) == 0
+                || strncmp(line, "OK:", 3) == 0 || strncmp(line, "SETFLOW:OK:", 11) == 0) {
+            fprintf(stderr, "[serial] telemetry: %s\n", line);
+            continue;
+        }
+
+        fprintf(stderr, "[serial] ignoring line: %s\n", line);
     }
-    /* Overflow guard: discard everything if buffer fills without a newline */
-    if (s_rx_len >= (int)(sizeof(s_rx_buf) - 1)) { s_rx_len = 0; }
+
+    return false;
+}
+
+bool serial_comm_read_rfid(char *tag_out, size_t tag_len)
+{
+    if (!tag_out || tag_len == 0) {
+        return false;
+    }
+
+    char line[96];
+    while (serial_read_next_line_nonblocking(line, sizeof(line))) {
+        if (strncmp(line, "RFID:", 5) == 0 && strlen(line) > 5) {
+            strncpy(tag_out, line + 5, tag_len - 1);
+            tag_out[tag_len - 1] = '\0';
+            fprintf(stderr, "[serial] rfid tag: %s\n", tag_out);
+            return true;
+        }
+
+        fprintf(stderr, "[serial] telemetry: %s\n", line);
+    }
+
     return false;
 }

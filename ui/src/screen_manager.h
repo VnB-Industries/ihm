@@ -17,6 +17,7 @@
 extern "C" {
 #endif
 
+#include <stdbool.h>
 #include <stdint.h>
 
 typedef enum {
@@ -51,6 +52,10 @@ void screen_manager_rfid_enroll_start(int user_id, uint32_t timeout_ms,
 
 /** Cancel an in-progress enrollment (safe to call when none is active). */
 void screen_manager_rfid_enroll_cancel(void);
+
+/* Enable/disable periodic RFID serial polling.
+ * Useful when another flow needs exclusive access to serial telemetry. */
+void screen_manager_set_rfid_poll_enabled(bool enabled);
 
 #ifdef __cplusplus
 }

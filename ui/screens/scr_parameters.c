@@ -2,6 +2,7 @@
 #include "screen_manager.h"
 #include "game_db.h"
 #include "serial_comm.h"
+#include <stdlib.h>
 #include <string.h>
 
 /* ── constants ──────────────────────────────────────────────────────────── */
@@ -9,6 +10,12 @@
 static const char k_correct_pin[]     = "2106";
 static const uint32_t k_purge_duration_ms = 10000; /* 10 s */
 static const uint32_t k_purge_tick_ms     = 100;   /* timer period */
+static const uint32_t k_calib_tick_ms     = 100;
+
+static const char k_cfg_pump1_flow[] = "pump1_pulses_per_cl_x1000";
+static const char k_cfg_pump2_flow[] = "pump2_flow_clps_x1000";
+static const int k_default_pump1_flow_scaled = 540420;
+static const int k_default_pump2_flow_scaled = 2800;
 
 /* ── static objects ─────────────────────────────────────────────────────── */
 
@@ -67,6 +74,21 @@ static lv_timer_t *s_purge_timer;
 static uint32_t    s_purge_elapsed_ms;
 static int         s_purge_pump_sel;     /* 0=pump1 / 1=pump2 / 2=both */
 
+/* ── Tab 4: Calibration ── */
+static lv_obj_t   *s_calib_pump_btn[2];   /* 0=Pump1, 1=Pump2 */
+static lv_obj_t   *s_calib_qty_ta;
+static lv_obj_t   *s_calib_start_btn;
+static lv_obj_t   *s_calib_start_lbl;
+static lv_obj_t   *s_calib_reset_btn;
+static lv_obj_t   *s_calib_status_lbl;
+static lv_obj_t   *s_calib_progress_lbl;
+static lv_obj_t   *s_calib_constant_lbl;
+static lv_timer_t *s_calib_timer;
+static bool        s_calib_running;
+static int         s_calib_pump_sel;      /* 0=pump1 / 1=pump2 */
+static float       s_calib_pump1_flow;
+static float       s_calib_pump2_flow;
+
 /* PIN state */
 static char s_pin_buf[5] = {'\0'};
 static int  s_pin_len    = 0;
@@ -88,6 +110,14 @@ static void on_delete_user(lv_event_t *e);
 static void stop_purge(void);static void on_params_enrollment_result(rfid_enroll_result_t result);
 static void on_admin_toggle(lv_event_t *e);
 static void on_rfid_badge_btn(lv_event_t *e);
+static void on_calib_pump_sel(lv_event_t *e);
+static void on_calib_reset_clicked(lv_event_t *e);
+static void on_calib_start_clicked(lv_event_t *e);
+static void on_calib_timer(lv_timer_t *t);
+static int flow_float_to_scaled(float value);
+static float flow_scaled_to_float(int value, float fallback);
+static void stop_calibration_ui(bool send_stop);
+static void update_calibration_ui(void);
 /* ── PIN helpers ────────────────────────────────────────────────────────── */
 
 static void update_pin_display(void)
@@ -220,6 +250,17 @@ static void show_config_phase(void)
     lv_slider_set_value(s_sld_timeout_mins,
         db_get_config("timeout_modifier_minutes", 5), LV_ANIM_OFF);
 
+    s_calib_pump1_flow = flow_scaled_to_float(
+        db_get_config(k_cfg_pump1_flow, k_default_pump1_flow_scaled), 540.42f);
+    s_calib_pump2_flow = flow_scaled_to_float(
+        db_get_config(k_cfg_pump2_flow, k_default_pump2_flow_scaled), 2.8f);
+    s_calib_pump_sel = 0;
+    lv_textarea_set_text(s_calib_qty_ta, "");
+    lv_label_set_text(s_calib_status_lbl, "Pret");
+    lv_obj_set_style_text_color(s_calib_status_lbl,
+                                lv_color_hex(0x888888), LV_PART_MAIN);
+    lv_label_set_text(s_calib_progress_lbl, "Progression: P1 0.00 cL | P2 0.00 cL");
+
     {
         char b1[192], b2[192], b3[192];
         db_get_text_config("home_banner_text_1", b1, sizeof(b1),
@@ -232,6 +273,7 @@ static void show_config_phase(void)
     }
 
     update_slider_labels();
+    update_calibration_ui();
     refresh_user_list();
 
     lv_obj_add_flag(s_pin_panel, LV_OBJ_FLAG_HIDDEN);
@@ -297,6 +339,142 @@ static void on_purge_timer(lv_timer_t *t)
         lv_obj_set_style_text_color(s_purge_lbl_status,
                                     lv_color_hex(0x00C853), LV_PART_MAIN);
         stop_purge();
+    }
+}
+
+/* ── calibration helpers ─────────────────────────────────────────────── */
+
+static int flow_float_to_scaled(float value)
+{
+    if (value <= 0.0f) {
+        return 0;
+    }
+    return (int)(value * 1000.0f + 0.5f);
+}
+
+static float flow_scaled_to_float(int value, float fallback)
+{
+    if (value <= 0) {
+        return fallback;
+    }
+    return value / 1000.0f;
+}
+
+static bool push_calibration_constants(void)
+{
+    return serial_comm_set_flow_constants(s_calib_pump1_flow, s_calib_pump2_flow);
+}
+
+static void update_calibration_pump_btns(void)
+{
+    for (int i = 0; i < 2; i++) {
+        bool active = (i == s_calib_pump_sel);
+        lv_obj_set_style_bg_color(s_calib_pump_btn[i],
+            active ? lv_color_hex(0xF5C518) : lv_color_hex(0x2A2A4A),
+            LV_PART_MAIN);
+        lv_obj_t *lbl = lv_obj_get_child(s_calib_pump_btn[i], 0);
+        if (lbl) {
+            lv_obj_set_style_text_color(lbl,
+                active ? lv_color_hex(0x1A1A2E) : lv_color_hex(0xEAEAEA),
+                LV_PART_MAIN);
+        }
+    }
+}
+
+static void update_calibration_ui(void)
+{
+    char buf[128];
+    lv_snprintf(buf, sizeof(buf), "P1: %.3f pulses/cL | P2: %.3f cL/s",
+                s_calib_pump1_flow, s_calib_pump2_flow);
+    lv_label_set_text(s_calib_constant_lbl, buf);
+
+    if (s_calib_running) {
+        lv_label_set_text(s_calib_start_lbl, LV_SYMBOL_STOP "  Arreter");
+        lv_obj_set_style_bg_color(s_calib_start_btn, lv_color_hex(0xD50000), LV_PART_MAIN);
+    } else {
+        lv_label_set_text(s_calib_start_lbl, LV_SYMBOL_PLAY "  Demarrer");
+        lv_obj_set_style_bg_color(s_calib_start_btn, lv_color_hex(0x00C853), LV_PART_MAIN);
+    }
+
+    update_calibration_pump_btns();
+}
+
+static void stop_calibration_ui(bool send_stop)
+{
+    if (send_stop) {
+        serial_comm_send_stop();
+    }
+
+    if (s_calib_timer) {
+        lv_timer_delete(s_calib_timer);
+        s_calib_timer = NULL;
+    }
+
+    s_calib_running = false;
+    screen_manager_set_rfid_poll_enabled(true);
+
+    lv_obj_clear_state(s_calib_pump_btn[0], LV_STATE_DISABLED);
+    lv_obj_clear_state(s_calib_pump_btn[1], LV_STATE_DISABLED);
+    lv_obj_clear_state(s_calib_qty_ta, LV_STATE_DISABLED);
+
+    update_calibration_ui();
+}
+
+static void on_calib_timer(lv_timer_t *t)
+{
+    (void)t;
+
+    serial_calibration_event_t ev;
+    while (serial_comm_read_calibration_event(&ev)) {
+        if (ev.type == SERIAL_CAL_EVENT_PROGRESS) {
+            char buf[96];
+            lv_snprintf(buf, sizeof(buf), "Progression: P1 %.2f cL | P2 %.2f cL",
+                        ev.pump1_value, ev.pump2_value);
+            lv_label_set_text(s_calib_progress_lbl, buf);
+            continue;
+        }
+
+        if (ev.type == SERIAL_CAL_EVENT_STOPPED_BY_SENSOR) {
+            if (s_calib_pump_sel == 0) {
+                s_calib_pump1_flow = ev.pump1_value;
+            } else {
+                s_calib_pump2_flow = ev.pump2_value;
+            }
+
+            db_set_config(k_cfg_pump1_flow, flow_float_to_scaled(s_calib_pump1_flow));
+            db_set_config(k_cfg_pump2_flow, flow_float_to_scaled(s_calib_pump2_flow));
+
+            if (push_calibration_constants()) {
+                lv_label_set_text(s_calib_status_lbl, LV_SYMBOL_OK "  Calibration appliquee");
+                lv_obj_set_style_text_color(s_calib_status_lbl,
+                                            lv_color_hex(0x00C853), LV_PART_MAIN);
+            } else {
+                lv_label_set_text(s_calib_status_lbl,
+                                  LV_SYMBOL_WARNING "  Valeur sauvee, sync serie echouee");
+                lv_obj_set_style_text_color(s_calib_status_lbl,
+                                            lv_color_hex(0xF5C518), LV_PART_MAIN);
+            }
+
+            stop_calibration_ui(false);
+            update_calibration_ui();
+            return;
+        }
+
+        if (ev.type == SERIAL_CAL_EVENT_STOPPED) {
+            lv_label_set_text(s_calib_status_lbl, "Calibration arretee");
+            lv_obj_set_style_text_color(s_calib_status_lbl,
+                                        lv_color_hex(0xF5C518), LV_PART_MAIN);
+            stop_calibration_ui(false);
+            return;
+        }
+
+        if (ev.type == SERIAL_CAL_EVENT_ERROR) {
+            lv_label_set_text(s_calib_status_lbl, ev.raw_line);
+            lv_obj_set_style_text_color(s_calib_status_lbl,
+                                        lv_color_hex(0xE94560), LV_PART_MAIN);
+            stop_calibration_ui(false);
+            return;
+        }
     }
 }
 
@@ -369,6 +547,9 @@ static void on_save_clicked(lv_event_t *e)
     db_set_config("timeout_modifier_minutes",
                   lv_slider_get_value(s_sld_timeout_mins));
 
+    db_set_config(k_cfg_pump1_flow, flow_float_to_scaled(s_calib_pump1_flow));
+    db_set_config(k_cfg_pump2_flow, flow_float_to_scaled(s_calib_pump2_flow));
+
     db_set_text_config("home_banner_text_1", lv_textarea_get_text(s_banner_ta_1));
     db_set_text_config("home_banner_text_2", lv_textarea_get_text(s_banner_ta_2));
     db_set_text_config("home_banner_text_3", lv_textarea_get_text(s_banner_ta_3));
@@ -377,6 +558,8 @@ static void on_save_clicked(lv_event_t *e)
 static void on_back_clicked(lv_event_t *e)
 {
     (void)e;
+    if (s_calib_running)
+        stop_calibration_ui(true);
     if (s_purge_timer)
         stop_purge();
     if (!lv_obj_has_flag(s_kb, LV_OBJ_FLAG_HIDDEN))
@@ -468,6 +651,105 @@ static void on_purge_pump_sel(lv_event_t *e)
 {
     s_purge_pump_sel = (int)(intptr_t)lv_event_get_user_data(e);
     update_purge_pump_btns();
+}
+
+static void on_calib_pump_sel(lv_event_t *e)
+{
+    if (s_calib_running) {
+        return;
+    }
+
+    s_calib_pump_sel = (int)(intptr_t)lv_event_get_user_data(e);
+    update_calibration_ui();
+}
+
+static void on_calib_reset_clicked(lv_event_t *e)
+{
+    (void)e;
+
+    if (s_calib_pump_sel == 0) {
+        s_calib_pump1_flow = flow_scaled_to_float(k_default_pump1_flow_scaled, 540.42f);
+    } else {
+        s_calib_pump2_flow = flow_scaled_to_float(k_default_pump2_flow_scaled, 2.8f);
+    }
+
+    db_set_config(k_cfg_pump1_flow, flow_float_to_scaled(s_calib_pump1_flow));
+    db_set_config(k_cfg_pump2_flow, flow_float_to_scaled(s_calib_pump2_flow));
+
+    if (push_calibration_constants()) {
+        lv_label_set_text(s_calib_status_lbl, "Valeur par defaut appliquee");
+        lv_obj_set_style_text_color(s_calib_status_lbl,
+                                    lv_color_hex(0x00C853), LV_PART_MAIN);
+    } else {
+        lv_label_set_text(s_calib_status_lbl,
+                          LV_SYMBOL_WARNING "  Defaut sauve, sync serie echouee");
+        lv_obj_set_style_text_color(s_calib_status_lbl,
+                                    lv_color_hex(0xF5C518), LV_PART_MAIN);
+    }
+
+    update_calibration_ui();
+}
+
+static void on_calib_start_clicked(lv_event_t *e)
+{
+    (void)e;
+
+    if (s_calib_running) {
+        lv_label_set_text(s_calib_status_lbl, "Arret en cours...");
+        lv_obj_set_style_text_color(s_calib_status_lbl,
+                                    lv_color_hex(0xF5C518), LV_PART_MAIN);
+        serial_comm_send_stop();
+        return;
+    }
+
+    const char *qty_txt = lv_textarea_get_text(s_calib_qty_ta);
+    if (!qty_txt || qty_txt[0] == '\0') {
+        lv_label_set_text(s_calib_status_lbl, "Entre une quantite en cL");
+        lv_obj_set_style_text_color(s_calib_status_lbl,
+                                    lv_color_hex(0xE94560), LV_PART_MAIN);
+        return;
+    }
+
+    char *endp = NULL;
+    float qty_cl = strtof(qty_txt, &endp);
+    if (endp == qty_txt || qty_cl <= 0.0f) {
+        lv_label_set_text(s_calib_status_lbl, "Quantite invalide");
+        lv_obj_set_style_text_color(s_calib_status_lbl,
+                                    lv_color_hex(0xE94560), LV_PART_MAIN);
+        return;
+    }
+
+    int pump_index = s_calib_pump_sel == 0 ? 1 : 2;
+    if (!serial_comm_start_calibration(pump_index, qty_cl)) {
+        const char *resp = serial_comm_last_response();
+        if (resp && strcmp(resp, "ERROR:NO_OBJECT") == 0) {
+            lv_label_set_text(s_calib_status_lbl, LV_SYMBOL_WARNING "  Aucun verre detecte");
+        } else {
+            lv_label_set_text(s_calib_status_lbl, LV_SYMBOL_WARNING "  Echec calibration");
+        }
+        lv_obj_set_style_text_color(s_calib_status_lbl,
+                                    lv_color_hex(0xE94560), LV_PART_MAIN);
+        return;
+    }
+
+    screen_manager_set_rfid_poll_enabled(false);
+    s_calib_running = true;
+
+    lv_obj_add_state(s_calib_pump_btn[0], LV_STATE_DISABLED);
+    lv_obj_add_state(s_calib_pump_btn[1], LV_STATE_DISABLED);
+    lv_obj_add_state(s_calib_qty_ta, LV_STATE_DISABLED);
+
+    lv_label_set_text(s_calib_progress_lbl, "Progression: P1 0.00 cL | P2 0.00 cL");
+    lv_label_set_text(s_calib_status_lbl,
+                      "Retire le verre quand la quantite est atteinte");
+    lv_obj_set_style_text_color(s_calib_status_lbl,
+                                lv_color_hex(0x00C853), LV_PART_MAIN);
+
+    if (s_calib_timer) {
+        lv_timer_delete(s_calib_timer);
+    }
+    s_calib_timer = lv_timer_create(on_calib_timer, k_calib_tick_ms, NULL);
+    update_calibration_ui();
 }
 
 /* ── RFID badge link/unlink callbacks ────────────────────────────── */
@@ -972,6 +1254,119 @@ void scr_parameters_init(void)
     lv_label_set_text(s_purge_start_lbl, LV_SYMBOL_PLAY "  Demarrer");
     lv_obj_center(s_purge_start_lbl);
 
+    /* ── Tab 4: Calibration ───────────────────────────────────────────── */
+    lv_obj_t *tab_calib = lv_tabview_add_tab(s_tabview,
+                                             LV_SYMBOL_EDIT "  Calibration");
+    lv_obj_set_style_bg_color(tab_calib, lv_color_hex(0x16213E), LV_PART_MAIN);
+    lv_obj_set_style_pad_all(tab_calib, 20, LV_PART_MAIN);
+    lv_obj_clear_flag(tab_calib, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *calib_desc = lv_label_create(tab_calib);
+    lv_label_set_text(calib_desc,
+        "Selectionne une pompe, entre la quantite cible (cL), puis retire le verre pour terminer.");
+    lv_obj_set_style_text_color(calib_desc, lv_color_hex(0xAAAAAA), LV_PART_MAIN);
+    lv_label_set_long_mode(calib_desc, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(calib_desc, SCREEN_W - 80);
+    lv_obj_align(calib_desc, LV_ALIGN_TOP_LEFT, 0, 0);
+
+    static const char *k_calib_pump_labels[2] = {
+        LV_SYMBOL_DOWNLOAD "  Pompe 1",
+        LV_SYMBOL_DOWNLOAD "  Pompe 2"
+    };
+
+    s_calib_pump_sel = 0;
+    s_calib_running = false;
+    s_calib_timer = NULL;
+    s_calib_pump1_flow = 540.42f;
+    s_calib_pump2_flow = 2.8f;
+
+    lv_obj_t *calib_sel_row = lv_obj_create(tab_calib);
+    lv_obj_set_size(calib_sel_row, LV_SIZE_CONTENT, 48);
+    lv_obj_align(calib_sel_row, LV_ALIGN_TOP_LEFT, 0, 56);
+    lv_obj_set_style_bg_opa(calib_sel_row, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(calib_sel_row, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(calib_sel_row, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_gap(calib_sel_row, 12, LV_PART_MAIN);
+    lv_obj_set_flex_flow(calib_sel_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(calib_sel_row, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_clear_flag(calib_sel_row, LV_OBJ_FLAG_SCROLLABLE);
+
+    for (int i = 0; i < 2; i++) {
+        s_calib_pump_btn[i] = lv_btn_create(calib_sel_row);
+        lv_obj_set_size(s_calib_pump_btn[i], 170, 44);
+        lv_obj_set_style_radius(s_calib_pump_btn[i], 8, LV_PART_MAIN);
+        lv_obj_add_event_cb(s_calib_pump_btn[i], on_calib_pump_sel,
+                            LV_EVENT_CLICKED, (void *)(intptr_t)i);
+        lv_obj_t *lbl = lv_label_create(s_calib_pump_btn[i]);
+        lv_label_set_text(lbl, k_calib_pump_labels[i]);
+        lv_obj_center(lbl);
+    }
+
+    lv_obj_t *qty_row = lv_obj_create(tab_calib);
+    lv_obj_set_size(qty_row, 420, 56);
+    lv_obj_align(qty_row, LV_ALIGN_TOP_LEFT, 0, 118);
+    lv_obj_set_style_bg_opa(qty_row, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(qty_row, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(qty_row, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_gap(qty_row, 8, LV_PART_MAIN);
+    lv_obj_set_flex_flow(qty_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(qty_row, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_clear_flag(qty_row, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *qty_lbl = lv_label_create(qty_row);
+    lv_label_set_text(qty_lbl, "Quantite (cL)");
+    lv_obj_set_style_text_color(qty_lbl, lv_color_hex(0xEAEAEA), LV_PART_MAIN);
+    lv_obj_set_width(qty_lbl, 160);
+
+    s_calib_qty_ta = lv_textarea_create(qty_row);
+    lv_obj_set_size(s_calib_qty_ta, 240, 44);
+    lv_textarea_set_one_line(s_calib_qty_ta, true);
+    lv_textarea_set_placeholder_text(s_calib_qty_ta, "ex: 20");
+    lv_obj_add_event_cb(s_calib_qty_ta, on_ta_focused, LV_EVENT_FOCUSED, NULL);
+
+    s_calib_start_btn = lv_btn_create(tab_calib);
+    lv_obj_set_size(s_calib_start_btn, 220, 58);
+    lv_obj_align(s_calib_start_btn, LV_ALIGN_TOP_LEFT, 0, 188);
+    lv_obj_set_style_bg_color(s_calib_start_btn, lv_color_hex(0x00C853), LV_PART_MAIN);
+    lv_obj_set_style_radius(s_calib_start_btn, 10, LV_PART_MAIN);
+    lv_obj_add_event_cb(s_calib_start_btn, on_calib_start_clicked,
+                        LV_EVENT_CLICKED, NULL);
+    s_calib_start_lbl = lv_label_create(s_calib_start_btn);
+    lv_obj_center(s_calib_start_lbl);
+
+    s_calib_reset_btn = lv_btn_create(tab_calib);
+    lv_obj_set_size(s_calib_reset_btn, 220, 58);
+    lv_obj_align(s_calib_reset_btn, LV_ALIGN_TOP_LEFT, 236, 188);
+    lv_obj_set_style_bg_color(s_calib_reset_btn, lv_color_hex(0x444444), LV_PART_MAIN);
+    lv_obj_set_style_radius(s_calib_reset_btn, 10, LV_PART_MAIN);
+    lv_obj_add_event_cb(s_calib_reset_btn, on_calib_reset_clicked,
+                        LV_EVENT_CLICKED, NULL);
+    lv_obj_t *calib_reset_lbl = lv_label_create(s_calib_reset_btn);
+    lv_label_set_text(calib_reset_lbl, LV_SYMBOL_REFRESH "  Defaut pompe");
+    lv_obj_center(calib_reset_lbl);
+
+    s_calib_status_lbl = lv_label_create(tab_calib);
+    lv_label_set_text(s_calib_status_lbl, "Pret");
+    lv_obj_set_style_text_color(s_calib_status_lbl,
+                                lv_color_hex(0x888888), LV_PART_MAIN);
+    lv_obj_align(s_calib_status_lbl, LV_ALIGN_TOP_LEFT, 0, 260);
+
+    s_calib_progress_lbl = lv_label_create(tab_calib);
+    lv_label_set_text(s_calib_progress_lbl, "Progression: P1 0.00 cL | P2 0.00 cL");
+    lv_obj_set_style_text_color(s_calib_progress_lbl,
+                                lv_color_hex(0xF5C518), LV_PART_MAIN);
+    lv_obj_align(s_calib_progress_lbl, LV_ALIGN_TOP_LEFT, 0, 292);
+
+    s_calib_constant_lbl = lv_label_create(tab_calib);
+    lv_label_set_text(s_calib_constant_lbl, "P1: 540.420 pulses/cL | P2: 2.800 cL/s");
+    lv_obj_set_style_text_color(s_calib_constant_lbl,
+                                lv_color_hex(0xEAEAEA), LV_PART_MAIN);
+    lv_obj_align(s_calib_constant_lbl, LV_ALIGN_TOP_LEFT, 0, 324);
+
+    update_calibration_ui();
+
     /* ── Keyboard overlay ──────────────────────────────────────────────── */
     s_kb = lv_keyboard_create(s_screen);
     lv_obj_set_size(s_kb, SCREEN_W, 220);
@@ -1093,6 +1488,9 @@ void scr_parameters_refresh(void)
     /* Abort any ongoing purge */
     if (s_purge_timer)
         stop_purge();
+    if (s_calib_running)
+        stop_calibration_ui(true);
+    screen_manager_set_rfid_poll_enabled(true);
 
     /* Always reset to PIN phase on entry */
     s_pin_len = 0;
