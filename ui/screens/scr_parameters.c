@@ -13,7 +13,6 @@ static const uint32_t k_purge_tick_ms     = 100;   /* timer period */
 static const uint32_t k_calib_tick_ms     = 100;
 
 static const char k_cfg_pump1_flow[] = "pump1_pulses_per_cl_x1000";
-static const char k_cfg_pump2_flow[] = "pump2_flow_clps_x1000";
 static const int k_default_pump1_flow_scaled = 540420;
 static const int k_default_pump2_flow_scaled = 2800;
 
@@ -64,7 +63,8 @@ static int        s_pending_delete_uid = -1;
 static char       s_pending_delete_name[GAME_DB_NAME_LEN];
 
 /* ── Tab 3: Purge ── */
-static lv_obj_t  *s_purge_pump_btn[3];   /* 0=Pompe 1  1=Pompe 2  2=Les deux */
+static lv_obj_t  *s_purge_sel_row;                         /* container for pump buttons */
+static lv_obj_t  *s_purge_pump_btn[GAME_DB_MAX_PUMPS + 1]; /* one per pump + "Tous" */
 static lv_obj_t  *s_purge_start_btn;
 static lv_obj_t  *s_purge_start_lbl;
 static lv_obj_t  *s_purge_bar;
@@ -72,10 +72,11 @@ static lv_obj_t  *s_purge_lbl_countdown;
 static lv_obj_t  *s_purge_lbl_status;
 static lv_timer_t *s_purge_timer;
 static uint32_t    s_purge_elapsed_ms;
-static int         s_purge_pump_sel;     /* 0=pump1 / 1=pump2 / 2=both */
+static int         s_purge_pump_sel;     /* 0..N-1 single pump, N = all */
 
 /* ── Tab 4: Calibration ── */
-static lv_obj_t   *s_calib_pump_btn[2];   /* 0=Pump1, 1=Pump2 */
+static lv_obj_t   *s_calib_sel_row;                     /* container for pump buttons */
+static lv_obj_t   *s_calib_pump_btn[GAME_DB_MAX_PUMPS];
 static lv_obj_t   *s_calib_qty_ta;
 static lv_obj_t   *s_calib_start_btn;
 static lv_obj_t   *s_calib_start_lbl;
@@ -85,9 +86,24 @@ static lv_obj_t   *s_calib_progress_lbl;
 static lv_obj_t   *s_calib_constant_lbl;
 static lv_timer_t *s_calib_timer;
 static bool        s_calib_running;
-static int         s_calib_pump_sel;      /* 0=pump1 / 1=pump2 */
-static float       s_calib_pump1_flow;
-static float       s_calib_pump2_flow;
+static int         s_calib_pump_sel;      /* 0-based pump index */
+static float       s_calib_flow[GAME_DB_MAX_PUMPS]; /* [0]=pulses/cL, others cL/s */
+
+/* Number of declared pumps (>=2), loaded from DB config 'pump_count'. */
+static int         s_pump_count = 2;
+static lv_obj_t   *s_sld_pump_count;
+static lv_obj_t   *s_lbl_pump_count;
+
+/* ── Tab 5: Cocktails ── */
+static lv_obj_t   *s_ck_list;
+static lv_obj_t   *s_ck_new_ta;
+static lv_obj_t   *s_ck_editor;
+static lv_obj_t   *s_ck_editor_title;
+static lv_obj_t   *s_ck_pump_row[GAME_DB_MAX_PUMPS];
+static lv_obj_t   *s_ck_mode_dd[GAME_DB_MAX_PUMPS];
+static lv_obj_t   *s_ck_value_ta[GAME_DB_MAX_PUMPS];
+static lv_obj_t   *s_ck_status_lbl;
+static int         s_ck_selected_id = -1;
 
 /* PIN state */
 static char s_pin_buf[5] = {'\0'};
@@ -118,6 +134,17 @@ static int flow_float_to_scaled(float value);
 static float flow_scaled_to_float(int value, float fallback);
 static void stop_calibration_ui(bool send_stop);
 static void update_calibration_ui(void);
+static void rebuild_purge_pump_btns(void);
+static void rebuild_calib_pump_btns(void);
+static void on_purge_pump_sel(lv_event_t *e);
+static void on_pump_count_changed(lv_event_t *e);
+static void refresh_cocktail_list(void);
+static void cocktail_open_editor(int cocktail_id);
+static void cocktail_close_editor(void);
+static void on_ta_focused(lv_event_t *e);
+static void calib_config_key(int idx0, char *buf, size_t n);
+static int  calib_default_scaled(int idx0);
+static float calib_default_flow(int idx0);
 /* ── PIN helpers ────────────────────────────────────────────────────────── */
 
 static void update_pin_display(void)
@@ -225,6 +252,11 @@ static void update_slider_labels(void)
     lv_label_set_text(s_lbl_timeout_rem_w, buf);
     lv_snprintf(buf, sizeof(buf), "%d min",lv_slider_get_value(s_sld_timeout_mins));
     lv_label_set_text(s_lbl_timeout_mins, buf);
+
+    if (s_sld_pump_count) {
+        lv_snprintf(buf, sizeof(buf), "%d", lv_slider_get_value(s_sld_pump_count));
+        lv_label_set_text(s_lbl_pump_count, buf);
+    }
 }
 
 static void show_config_phase(void)
@@ -250,16 +282,25 @@ static void show_config_phase(void)
     lv_slider_set_value(s_sld_timeout_mins,
         db_get_config("timeout_modifier_minutes", 5), LV_ANIM_OFF);
 
-    s_calib_pump1_flow = flow_scaled_to_float(
-        db_get_config(k_cfg_pump1_flow, k_default_pump1_flow_scaled), 540.42f);
-    s_calib_pump2_flow = flow_scaled_to_float(
-        db_get_config(k_cfg_pump2_flow, k_default_pump2_flow_scaled), 2.8f);
+    s_pump_count = db_get_config("pump_count", 2);
+    if (s_pump_count < 2) s_pump_count = 2;
+    if (s_pump_count > GAME_DB_MAX_PUMPS) s_pump_count = GAME_DB_MAX_PUMPS;
+    lv_slider_set_value(s_sld_pump_count, s_pump_count, LV_ANIM_OFF);
+
+    for (int i = 0; i < s_pump_count; i++) {
+        char key[40];
+        calib_config_key(i, key, sizeof(key));
+        s_calib_flow[i] = flow_scaled_to_float(
+            db_get_config(key, calib_default_scaled(i)), calib_default_flow(i));
+    }
     s_calib_pump_sel = 0;
+    rebuild_calib_pump_btns();
+    rebuild_purge_pump_btns();
     lv_textarea_set_text(s_calib_qty_ta, "");
     lv_label_set_text(s_calib_status_lbl, "Pret");
     lv_obj_set_style_text_color(s_calib_status_lbl,
                                 lv_color_hex(0x888888), LV_PART_MAIN);
-    lv_label_set_text(s_calib_progress_lbl, "Progression: P1 0.00 cL | P2 0.00 cL");
+    lv_label_set_text(s_calib_progress_lbl, "Progression: 0.00 cL");
 
     {
         char b1[192], b2[192], b3[192];
@@ -275,16 +316,25 @@ static void show_config_phase(void)
     update_slider_labels();
     update_calibration_ui();
     refresh_user_list();
-
+    refresh_cocktail_list();
+    cocktail_close_editor();
     lv_obj_add_flag(s_pin_panel, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(s_cfg_panel, LV_OBJ_FLAG_HIDDEN);
 }
 
 /* ── purge helpers ──────────────────────────────────────────────────────── */
 
+/* Number of purge selection buttons: one per pump plus a "Tous" button. */
+static int purge_btn_count(void)
+{
+    return s_pump_count + 1;
+}
+
 static void update_purge_pump_btns(void)
 {
-    for (int i = 0; i < 3; i++) {
+    int n = purge_btn_count();
+    for (int i = 0; i < n; i++) {
+        if (!s_purge_pump_btn[i]) continue;
         bool active = (i == s_purge_pump_sel);
         lv_obj_set_style_bg_color(s_purge_pump_btn[i],
             active ? lv_color_hex(0xF5C518) : lv_color_hex(0x2A2A4A),
@@ -296,6 +346,34 @@ static void update_purge_pump_btns(void)
                 LV_PART_MAIN);
         }
     }
+}
+
+/* Recreate the purge pump-selection buttons for the current pump count. */
+static void rebuild_purge_pump_btns(void)
+{
+    if (!s_purge_sel_row) return;
+    lv_obj_clean(s_purge_sel_row);
+
+    int n = purge_btn_count();
+    if (s_purge_pump_sel >= n) s_purge_pump_sel = n - 1; /* default: "Tous" */
+
+    for (int i = 0; i < n; i++) {
+        char txt[24];
+        if (i < s_pump_count)
+            lv_snprintf(txt, sizeof(txt), LV_SYMBOL_DOWNLOAD "  Pompe %d", i + 1);
+        else
+            lv_snprintf(txt, sizeof(txt), LV_SYMBOL_DOWNLOAD "  Toutes");
+
+        s_purge_pump_btn[i] = lv_btn_create(s_purge_sel_row);
+        lv_obj_set_size(s_purge_pump_btn[i], 150, 44);
+        lv_obj_set_style_radius(s_purge_pump_btn[i], 8, LV_PART_MAIN);
+        lv_obj_add_event_cb(s_purge_pump_btn[i], on_purge_pump_sel,
+                            LV_EVENT_CLICKED, (void *)(intptr_t)i);
+        lv_obj_t *lbl = lv_label_create(s_purge_pump_btn[i]);
+        lv_label_set_text(lbl, txt);
+        lv_obj_center(lbl);
+    }
+    update_purge_pump_btns();
 }
 
 static void stop_purge(void)
@@ -313,8 +391,10 @@ static void stop_purge(void)
     lv_label_set_text(s_purge_lbl_status, "Pret");
     lv_obj_set_style_text_color(s_purge_lbl_status, lv_color_hex(0x888888), LV_PART_MAIN);
 
-    for (int i = 0; i < 3; i++)
-        lv_obj_clear_state(s_purge_pump_btn[i], LV_STATE_DISABLED);
+    int n = purge_btn_count();
+    for (int i = 0; i < n; i++)
+        if (s_purge_pump_btn[i])
+            lv_obj_clear_state(s_purge_pump_btn[i], LV_STATE_DISABLED);
 }
 
 static void on_purge_timer(lv_timer_t *t)
@@ -360,14 +440,47 @@ static float flow_scaled_to_float(int value, float fallback)
     return value / 1000.0f;
 }
 
+/* Config key for a pump's flow constant. idx0==0 -> pump1 pulses/cL,
+ * idx0>=1 -> pump N (=idx0+1) time-based cL/s. */
+static void calib_config_key(int idx0, char *buf, size_t n)
+{
+    if (idx0 == 0)
+        lv_snprintf(buf, (uint32_t)n, "%s", k_cfg_pump1_flow);
+    else
+        lv_snprintf(buf, (uint32_t)n, "pump%d_flow_clps_x1000", idx0 + 1);
+}
+
+static int calib_default_scaled(int idx0)
+{
+    return idx0 == 0 ? k_default_pump1_flow_scaled : k_default_pump2_flow_scaled;
+}
+
+static float calib_default_flow(int idx0)
+{
+    return idx0 == 0 ? 540.42f : 2.8f;
+}
+
+static void save_calib_flow(int idx0)
+{
+    char key[40];
+    calib_config_key(idx0, key, sizeof(key));
+    db_set_config(key, flow_float_to_scaled(s_calib_flow[idx0]));
+}
+
 static bool push_calibration_constants(void)
 {
-    return serial_comm_set_flow_constants(s_calib_pump1_flow, s_calib_pump2_flow);
+    float time_flows[GAME_DB_MAX_PUMPS - 1];
+    int tc = s_pump_count - 1;
+    if (tc < 0) tc = 0;
+    for (int i = 0; i < tc; i++)
+        time_flows[i] = s_calib_flow[i + 1];
+    return serial_comm_set_flow_constants(s_calib_flow[0], time_flows, tc);
 }
 
 static void update_calibration_pump_btns(void)
 {
-    for (int i = 0; i < 2; i++) {
+    for (int i = 0; i < s_pump_count; i++) {
+        if (!s_calib_pump_btn[i]) continue;
         bool active = (i == s_calib_pump_sel);
         lv_obj_set_style_bg_color(s_calib_pump_btn[i],
             active ? lv_color_hex(0xF5C518) : lv_color_hex(0x2A2A4A),
@@ -381,11 +494,39 @@ static void update_calibration_pump_btns(void)
     }
 }
 
+/* Recreate the calibration pump-selection buttons for the current pump count. */
+static void rebuild_calib_pump_btns(void)
+{
+    if (!s_calib_sel_row) return;
+    lv_obj_clean(s_calib_sel_row);
+
+    if (s_calib_pump_sel >= s_pump_count) s_calib_pump_sel = 0;
+
+    for (int i = 0; i < s_pump_count; i++) {
+        char txt[24];
+        lv_snprintf(txt, sizeof(txt), LV_SYMBOL_DOWNLOAD "  Pompe %d", i + 1);
+        s_calib_pump_btn[i] = lv_btn_create(s_calib_sel_row);
+        lv_obj_set_size(s_calib_pump_btn[i], 150, 44);
+        lv_obj_set_style_radius(s_calib_pump_btn[i], 8, LV_PART_MAIN);
+        lv_obj_add_event_cb(s_calib_pump_btn[i], on_calib_pump_sel,
+                            LV_EVENT_CLICKED, (void *)(intptr_t)i);
+        lv_obj_t *lbl = lv_label_create(s_calib_pump_btn[i]);
+        lv_label_set_text(lbl, txt);
+        lv_obj_center(lbl);
+    }
+    update_calibration_pump_btns();
+}
+
 static void update_calibration_ui(void)
 {
     char buf[128];
-    lv_snprintf(buf, sizeof(buf), "P1: %.3f pulses/cL | P2: %.3f cL/s",
-                s_calib_pump1_flow, s_calib_pump2_flow);
+    int idx = s_calib_pump_sel;
+    if (idx == 0)
+        lv_snprintf(buf, sizeof(buf), "P1: %.3f pulses/cL (debitmetre)",
+                    s_calib_flow[0]);
+    else
+        lv_snprintf(buf, sizeof(buf), "P%d: %.3f cL/s (temporise)",
+                    idx + 1, s_calib_flow[idx]);
     lv_label_set_text(s_calib_constant_lbl, buf);
 
     if (s_calib_running) {
@@ -413,8 +554,9 @@ static void stop_calibration_ui(bool send_stop)
     s_calib_running = false;
     screen_manager_set_rfid_poll_enabled(true);
 
-    lv_obj_clear_state(s_calib_pump_btn[0], LV_STATE_DISABLED);
-    lv_obj_clear_state(s_calib_pump_btn[1], LV_STATE_DISABLED);
+    for (int i = 0; i < s_pump_count; i++)
+        if (s_calib_pump_btn[i])
+            lv_obj_clear_state(s_calib_pump_btn[i], LV_STATE_DISABLED);
     lv_obj_clear_state(s_calib_qty_ta, LV_STATE_DISABLED);
 
     update_calibration_ui();
@@ -428,21 +570,18 @@ static void on_calib_timer(lv_timer_t *t)
     while (serial_comm_read_calibration_event(&ev)) {
         if (ev.type == SERIAL_CAL_EVENT_PROGRESS) {
             char buf[96];
-            lv_snprintf(buf, sizeof(buf), "Progression: P1 %.2f cL | P2 %.2f cL",
-                        ev.pump1_value, ev.pump2_value);
+            lv_snprintf(buf, sizeof(buf), "Progression: %.2f cL", ev.value);
             lv_label_set_text(s_calib_progress_lbl, buf);
             continue;
         }
 
         if (ev.type == SERIAL_CAL_EVENT_STOPPED_BY_SENSOR) {
-            if (s_calib_pump_sel == 0) {
-                s_calib_pump1_flow = ev.pump1_value;
-            } else {
-                s_calib_pump2_flow = ev.pump2_value;
-            }
+            int idx0 = ev.pump_index - 1;
+            if (idx0 < 0 || idx0 >= s_pump_count)
+                idx0 = s_calib_pump_sel;
+            s_calib_flow[idx0] = ev.value;
 
-            db_set_config(k_cfg_pump1_flow, flow_float_to_scaled(s_calib_pump1_flow));
-            db_set_config(k_cfg_pump2_flow, flow_float_to_scaled(s_calib_pump2_flow));
+            save_calib_flow(idx0);
 
             if (push_calibration_constants()) {
                 lv_label_set_text(s_calib_status_lbl, LV_SYMBOL_OK "  Calibration appliquee");
@@ -523,6 +662,33 @@ static void on_slider_changed(lv_event_t *e)
     update_slider_labels();
 }
 
+static void on_pump_count_changed(lv_event_t *e)
+{
+    (void)e;
+    int newc = lv_slider_get_value(s_sld_pump_count);
+    if (newc < 2) newc = 2;
+    if (newc > GAME_DB_MAX_PUMPS) newc = GAME_DB_MAX_PUMPS;
+
+    /* Load default/config flow for any newly added pumps. */
+    for (int i = s_pump_count; i < newc; i++) {
+        char key[40];
+        calib_config_key(i, key, sizeof(key));
+        s_calib_flow[i] = flow_scaled_to_float(
+            db_get_config(key, calib_default_scaled(i)), calib_default_flow(i));
+    }
+    s_pump_count = newc;
+
+    rebuild_calib_pump_btns();
+    rebuild_purge_pump_btns();
+    update_slider_labels();
+    update_calibration_ui();
+
+    if (s_ck_selected_id >= 0)
+        cocktail_open_editor(s_ck_selected_id);
+    else
+        cocktail_close_editor();
+}
+
 static void on_save_clicked(lv_event_t *e)
 {
     (void)e;
@@ -547,8 +713,9 @@ static void on_save_clicked(lv_event_t *e)
     db_set_config("timeout_modifier_minutes",
                   lv_slider_get_value(s_sld_timeout_mins));
 
-    db_set_config(k_cfg_pump1_flow, flow_float_to_scaled(s_calib_pump1_flow));
-    db_set_config(k_cfg_pump2_flow, flow_float_to_scaled(s_calib_pump2_flow));
+    db_set_config("pump_count", s_pump_count);
+    for (int i = 0; i < s_pump_count; i++)
+        save_calib_flow(i);
 
     db_set_text_config("home_banner_text_1", lv_textarea_get_text(s_banner_ta_1));
     db_set_text_config("home_banner_text_2", lv_textarea_get_text(s_banner_ta_2));
@@ -667,14 +834,10 @@ static void on_calib_reset_clicked(lv_event_t *e)
 {
     (void)e;
 
-    if (s_calib_pump_sel == 0) {
-        s_calib_pump1_flow = flow_scaled_to_float(k_default_pump1_flow_scaled, 540.42f);
-    } else {
-        s_calib_pump2_flow = flow_scaled_to_float(k_default_pump2_flow_scaled, 2.8f);
-    }
-
-    db_set_config(k_cfg_pump1_flow, flow_float_to_scaled(s_calib_pump1_flow));
-    db_set_config(k_cfg_pump2_flow, flow_float_to_scaled(s_calib_pump2_flow));
+    int idx0 = s_calib_pump_sel;
+    s_calib_flow[idx0] = flow_scaled_to_float(calib_default_scaled(idx0),
+                                              calib_default_flow(idx0));
+    save_calib_flow(idx0);
 
     if (push_calibration_constants()) {
         lv_label_set_text(s_calib_status_lbl, "Valeur par defaut appliquee");
@@ -719,7 +882,7 @@ static void on_calib_start_clicked(lv_event_t *e)
         return;
     }
 
-    int pump_index = s_calib_pump_sel == 0 ? 1 : 2;
+    int pump_index = s_calib_pump_sel + 1;
     if (!serial_comm_start_calibration(pump_index, qty_cl)) {
         const char *resp = serial_comm_last_response();
         if (resp && strcmp(resp, "ERROR:NO_OBJECT") == 0) {
@@ -735,11 +898,12 @@ static void on_calib_start_clicked(lv_event_t *e)
     screen_manager_set_rfid_poll_enabled(false);
     s_calib_running = true;
 
-    lv_obj_add_state(s_calib_pump_btn[0], LV_STATE_DISABLED);
-    lv_obj_add_state(s_calib_pump_btn[1], LV_STATE_DISABLED);
+    for (int i = 0; i < s_pump_count; i++)
+        if (s_calib_pump_btn[i])
+            lv_obj_add_state(s_calib_pump_btn[i], LV_STATE_DISABLED);
     lv_obj_add_state(s_calib_qty_ta, LV_STATE_DISABLED);
 
-    lv_label_set_text(s_calib_progress_lbl, "Progression: P1 0.00 cL | P2 0.00 cL");
+    lv_label_set_text(s_calib_progress_lbl, "Progression: 0.00 cL");
     lv_label_set_text(s_calib_status_lbl,
                       "Retire le verre quand la quantite est atteinte");
     lv_obj_set_style_text_color(s_calib_status_lbl,
@@ -878,11 +1042,14 @@ static void on_purge_start_clicked(lv_event_t *e)
         return;
     }
 
-    /* Determine volumes: 999 cL is large enough to not finish before STOP */
-    int p1 = (s_purge_pump_sel == 0 || s_purge_pump_sel == 2) ? 999 : 0;
-    int p2 = (s_purge_pump_sel == 1 || s_purge_pump_sel == 2) ? 999 : 0;
+    /* Determine volumes: 999 cL is large enough to not finish before STOP.
+     * s_purge_pump_sel in [0..N-1] selects a single pump, ==N selects all. */
+    int volumes[GAME_DB_MAX_PUMPS];
+    bool all = (s_purge_pump_sel >= s_pump_count);
+    for (int i = 0; i < s_pump_count; i++)
+        volumes[i] = (all || i == s_purge_pump_sel) ? 999 : 0;
 
-    if (!serial_comm_send_dispense_cl(p1, p2)) {
+    if (!serial_comm_send_dispense_cl_n(volumes, s_pump_count)) {
         const char *resp = serial_comm_last_response();
         if (resp && strcmp(resp, "ERROR:NO_OBJECT") == 0)
             lv_label_set_text(s_purge_lbl_status, LV_SYMBOL_WARNING " Aucun verre detecte");
@@ -894,8 +1061,10 @@ static void on_purge_start_clicked(lv_event_t *e)
     }
 
     /* Lock pump selection during purge */
-    for (int i = 0; i < 3; i++)
-        lv_obj_add_state(s_purge_pump_btn[i], LV_STATE_DISABLED);
+    int nbtn = purge_btn_count();
+    for (int i = 0; i < nbtn; i++)
+        if (s_purge_pump_btn[i])
+            lv_obj_add_state(s_purge_pump_btn[i], LV_STATE_DISABLED);
 
     lv_label_set_text(s_purge_start_lbl, LV_SYMBOL_STOP "  Arreter");
     lv_obj_set_style_bg_color(s_purge_start_btn, lv_color_hex(0xD50000), LV_PART_MAIN);
@@ -987,6 +1156,187 @@ static lv_obj_t *make_tab_scroll(lv_obj_t *tab)
     lv_obj_set_flex_flow(sc, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_scroll_dir(sc, LV_DIR_VER);
     return sc;
+}
+
+/* ── cocktails helpers ──────────────────────────────────────────────────── */
+
+static void on_ck_select(lv_event_t *e)
+{
+    cocktail_open_editor((int)(intptr_t)lv_event_get_user_data(e));
+}
+
+static void on_ck_delete(lv_event_t *e)
+{
+    int id = (int)(intptr_t)lv_event_get_user_data(e);
+    db_delete_cocktail(id);
+    if (s_ck_selected_id == id)
+        cocktail_close_editor();
+    refresh_cocktail_list();
+}
+
+static void refresh_cocktail_list(void)
+{
+    if (!s_ck_list) return;
+    lv_obj_clean(s_ck_list);
+
+    cocktail_record_t cks[GAME_DB_MAX_COCKTAILS];
+    int count = db_get_all_cocktails(cks, GAME_DB_MAX_COCKTAILS);
+
+    for (int i = 0; i < count; i++) {
+        lv_obj_t *row = lv_obj_create(s_ck_list);
+        lv_obj_set_size(row, SCREEN_INNER_W - 28, 52);
+        lv_obj_set_style_bg_color(row, lv_color_hex(0x0F3460), LV_PART_MAIN);
+        lv_obj_set_style_border_width(row, 0, LV_PART_MAIN);
+        lv_obj_set_style_radius(row, 6, LV_PART_MAIN);
+        lv_obj_set_style_pad_hor(row, 10, LV_PART_MAIN);
+        lv_obj_set_style_pad_ver(row, 0, LV_PART_MAIN);
+        lv_obj_set_style_pad_gap(row, 8, LV_PART_MAIN);
+        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START,
+                              LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+
+        lv_obj_t *lbl = lv_label_create(row);
+        lv_label_set_text(lbl, cks[i].name);
+        lv_obj_set_style_text_color(lbl, lv_color_hex(0xEAEAEA), LV_PART_MAIN);
+        lv_obj_set_flex_grow(lbl, 1);
+
+        lv_obj_t *edit_btn = lv_btn_create(row);
+        lv_obj_set_size(edit_btn, 140, 40);
+        lv_obj_set_style_bg_color(edit_btn, lv_color_hex(0x0F3460), LV_PART_MAIN);
+        lv_obj_set_style_radius(edit_btn, 6, LV_PART_MAIN);
+        lv_obj_add_event_cb(edit_btn, on_ck_select, LV_EVENT_CLICKED,
+                            (void *)(intptr_t)cks[i].id);
+        lv_obj_t *elbl = lv_label_create(edit_btn);
+        lv_label_set_text(elbl, LV_SYMBOL_EDIT "  Recette");
+        lv_obj_center(elbl);
+
+        lv_obj_t *del = lv_btn_create(row);
+        lv_obj_set_size(del, 60, 40);
+        lv_obj_set_style_bg_color(del, lv_color_hex(0xD50000), LV_PART_MAIN);
+        lv_obj_add_event_cb(del, on_ck_delete, LV_EVENT_CLICKED,
+                            (void *)(intptr_t)cks[i].id);
+        lv_obj_t *dl = lv_label_create(del);
+        lv_label_set_text(dl, LV_SYMBOL_CLOSE);
+        lv_obj_center(dl);
+    }
+}
+
+static void cocktail_close_editor(void)
+{
+    s_ck_selected_id = -1;
+    if (s_ck_editor)
+        lv_obj_add_flag(s_ck_editor, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void cocktail_open_editor(int cocktail_id)
+{
+    if (!s_ck_editor) return;
+    s_ck_selected_id = cocktail_id;
+
+    cocktail_record_t cks[GAME_DB_MAX_COCKTAILS];
+    int count = db_get_all_cocktails(cks, GAME_DB_MAX_COCKTAILS);
+    const char *name = "";
+    for (int i = 0; i < count; i++)
+        if (cks[i].id == cocktail_id) { name = cks[i].name; break; }
+    char title[80];
+    lv_snprintf(title, sizeof(title), "Recette: %s", name);
+    lv_label_set_text(s_ck_editor_title, title);
+
+    /* Reset all rows, show only the active pumps. */
+    for (int i = 0; i < GAME_DB_MAX_PUMPS; i++) {
+        if (!s_ck_pump_row[i]) continue;
+        if (i < s_pump_count)
+            lv_obj_clear_flag(s_ck_pump_row[i], LV_OBJ_FLAG_HIDDEN);
+        else
+            lv_obj_add_flag(s_ck_pump_row[i], LV_OBJ_FLAG_HIDDEN);
+        lv_dropdown_set_selected(s_ck_mode_dd[i], 0);
+        lv_textarea_set_text(s_ck_value_ta[i], "");
+        lv_obj_add_state(s_ck_value_ta[i], LV_STATE_DISABLED);
+    }
+
+    cocktail_pump_t pumps[GAME_DB_MAX_PUMPS];
+    int pn = db_get_cocktail_pumps(cocktail_id, pumps, GAME_DB_MAX_PUMPS);
+    for (int i = 0; i < pn; i++) {
+        int idx0 = pumps[i].pump_index - 1;
+        if (idx0 < 0 || idx0 >= s_pump_count) continue;
+        int dd = pumps[i].mode + 1; /* CL->1, PERCENT->2, WHEEL->3 */
+        if (dd < 1 || dd > 3) dd = 1;
+        lv_dropdown_set_selected(s_ck_mode_dd[idx0], dd);
+        if (pumps[i].mode != COCKTAIL_QTY_WHEEL) {
+            char vb[16];
+            lv_snprintf(vb, sizeof(vb), "%d", pumps[i].value);
+            lv_textarea_set_text(s_ck_value_ta[idx0], vb);
+            lv_obj_clear_state(s_ck_value_ta[idx0], LV_STATE_DISABLED);
+        }
+    }
+
+    lv_label_set_text(s_ck_status_lbl, "");
+    lv_obj_clear_flag(s_ck_editor, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void on_ck_add_clicked(lv_event_t *e)
+{
+    (void)e;
+    const char *name = lv_textarea_get_text(s_ck_new_ta);
+    if (!name || name[0] == '\0')
+        return;
+    int id = db_add_cocktail(name);
+    lv_textarea_set_text(s_ck_new_ta, "");
+    lv_obj_add_flag(s_kb, LV_OBJ_FLAG_HIDDEN);
+    refresh_cocktail_list();
+    if (id > 0)
+        cocktail_open_editor(id);
+}
+
+static void on_ck_mode_changed(lv_event_t *e)
+{
+    lv_obj_t *dd = lv_event_get_target(e);
+    int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    if (idx < 0 || idx >= GAME_DB_MAX_PUMPS) return;
+
+    int sel = lv_dropdown_get_selected(dd);
+    /* Value input is only meaningful for cL (1) and percent (2). */
+    if (sel == 1 || sel == 2)
+        lv_obj_clear_state(s_ck_value_ta[idx], LV_STATE_DISABLED);
+    else
+        lv_obj_add_state(s_ck_value_ta[idx], LV_STATE_DISABLED);
+}
+
+static void on_ck_save_clicked(lv_event_t *e)
+{
+    (void)e;
+    if (s_ck_selected_id < 0)
+        return;
+
+    cocktail_pump_t pumps[GAME_DB_MAX_PUMPS];
+    int n = 0;
+    for (int i = 0; i < s_pump_count; i++) {
+        int dd = lv_dropdown_get_selected(s_ck_mode_dd[i]);
+        if (dd == 0)
+            continue; /* Aucun -> pump not used */
+        int mode = dd - 1;
+        int value = 0;
+        if (mode != COCKTAIL_QTY_WHEEL) {
+            const char *vt = lv_textarea_get_text(s_ck_value_ta[i]);
+            value = (vt && vt[0]) ? atoi(vt) : 0;
+            if (value < 0) value = 0;
+        }
+        pumps[n].pump_index = i + 1;
+        pumps[n].mode = mode;
+        pumps[n].value = value;
+        n++;
+    }
+
+    if (db_set_cocktail_pumps(s_ck_selected_id, pumps, n) == 0) {
+        lv_label_set_text(s_ck_status_lbl, LV_SYMBOL_OK "  Recette enregistree");
+        lv_obj_set_style_text_color(s_ck_status_lbl,
+                                    lv_color_hex(0x00C853), LV_PART_MAIN);
+    } else {
+        lv_label_set_text(s_ck_status_lbl, LV_SYMBOL_WARNING "  Erreur d'enregistrement");
+        lv_obj_set_style_text_color(s_ck_status_lbl,
+                                    lv_color_hex(0xE94560), LV_PART_MAIN);
+    }
 }
 
 /* ── public API ─────────────────────────────────────────────────────────── */
@@ -1095,6 +1445,21 @@ void scr_parameters_init(void)
 
     lv_obj_t *sc_game = make_tab_scroll(tab_game);
 
+    add_section_label(sc_game, "Pompes");
+    create_slider_row(sc_game, "Nombre de pompes", 2, GAME_DB_MAX_PUMPS,
+                      &s_sld_pump_count, &s_lbl_pump_count);
+    lv_obj_add_event_cb(s_sld_pump_count, on_pump_count_changed,
+                        LV_EVENT_VALUE_CHANGED, NULL);
+    {
+        lv_obj_t *hint = lv_label_create(sc_game);
+        lv_label_set_text(hint,
+            "Pompe 1 = debitmetre (pin 7). Pompes 2+ = temporisees.\n"
+            "Broches: P1=7  P2=6  P3=5  P4=8  P5=9  P6=3");
+        lv_obj_set_style_text_color(hint, lv_color_hex(0x888888), LV_PART_MAIN);
+        lv_label_set_long_mode(hint, LV_LABEL_LONG_WRAP);
+        lv_obj_set_width(hint, SCREEN_INNER_W - 28);
+    }
+
     add_section_label(sc_game, "Chances");
     create_slider_row(sc_game, "Chance roue bonus (%)", 0, 100,
                       &s_sld_trigger, &s_lbl_trigger);
@@ -1187,37 +1552,21 @@ void scr_parameters_init(void)
     lv_obj_set_width(purge_desc, SCREEN_W - 80);
     lv_obj_align(purge_desc, LV_ALIGN_TOP_LEFT, 0, 0);
 
-    /* Pump selection */
-    static const char *k_pump_labels[3] = {
-        LV_SYMBOL_DOWNLOAD "  Pompe 1",
-        LV_SYMBOL_DOWNLOAD "  Pompe 2",
-        LV_SYMBOL_DOWNLOAD "  Les deux"
-    };
-    s_purge_pump_sel = 2; /* default: both */
+    /* Pump selection (buttons built dynamically per pump count) */
+    s_purge_pump_sel = GAME_DB_MAX_PUMPS; /* default: all */
 
-    lv_obj_t *sel_row = lv_obj_create(tab_purge);
-    lv_obj_set_size(sel_row, LV_SIZE_CONTENT, 48);
-    lv_obj_align(sel_row, LV_ALIGN_TOP_LEFT, 0, 48);
-    lv_obj_set_style_bg_opa(sel_row, LV_OPA_TRANSP, LV_PART_MAIN);
-    lv_obj_set_style_border_width(sel_row, 0, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(sel_row, 0, LV_PART_MAIN);
-    lv_obj_set_style_pad_gap(sel_row, 12, LV_PART_MAIN);
-    lv_obj_set_flex_flow(sel_row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(sel_row, LV_FLEX_ALIGN_START,
+    s_purge_sel_row = lv_obj_create(tab_purge);
+    lv_obj_set_size(s_purge_sel_row, SCREEN_W - 80, 48);
+    lv_obj_align(s_purge_sel_row, LV_ALIGN_TOP_LEFT, 0, 48);
+    lv_obj_set_style_bg_opa(s_purge_sel_row, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(s_purge_sel_row, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(s_purge_sel_row, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_gap(s_purge_sel_row, 8, LV_PART_MAIN);
+    lv_obj_set_flex_flow(s_purge_sel_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(s_purge_sel_row, LV_FLEX_ALIGN_START,
                           LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_clear_flag(sel_row, LV_OBJ_FLAG_SCROLLABLE);
-
-    for (int i = 0; i < 3; i++) {
-        s_purge_pump_btn[i] = lv_btn_create(sel_row);
-        lv_obj_set_size(s_purge_pump_btn[i], 160, 44);
-        lv_obj_set_style_radius(s_purge_pump_btn[i], 8, LV_PART_MAIN);
-        lv_obj_add_event_cb(s_purge_pump_btn[i], on_purge_pump_sel,
-                            LV_EVENT_CLICKED, (void *)(intptr_t)i);
-        lv_obj_t *lbl = lv_label_create(s_purge_pump_btn[i]);
-        lv_label_set_text(lbl, k_pump_labels[i]);
-        lv_obj_center(lbl);
-    }
-    update_purge_pump_btns();
+    lv_obj_clear_flag(s_purge_sel_row, LV_OBJ_FLAG_SCROLLABLE);
+    rebuild_purge_pump_btns();
 
     /* Progress bar */
     s_purge_bar = lv_bar_create(tab_purge);
@@ -1269,39 +1618,25 @@ void scr_parameters_init(void)
     lv_obj_set_width(calib_desc, SCREEN_W - 80);
     lv_obj_align(calib_desc, LV_ALIGN_TOP_LEFT, 0, 0);
 
-    static const char *k_calib_pump_labels[2] = {
-        LV_SYMBOL_DOWNLOAD "  Pompe 1",
-        LV_SYMBOL_DOWNLOAD "  Pompe 2"
-    };
-
     s_calib_pump_sel = 0;
     s_calib_running = false;
     s_calib_timer = NULL;
-    s_calib_pump1_flow = 540.42f;
-    s_calib_pump2_flow = 2.8f;
+    s_calib_flow[0] = 540.42f;
+    for (int i = 1; i < GAME_DB_MAX_PUMPS; i++)
+        s_calib_flow[i] = 2.8f;
 
-    lv_obj_t *calib_sel_row = lv_obj_create(tab_calib);
-    lv_obj_set_size(calib_sel_row, LV_SIZE_CONTENT, 48);
-    lv_obj_align(calib_sel_row, LV_ALIGN_TOP_LEFT, 0, 56);
-    lv_obj_set_style_bg_opa(calib_sel_row, LV_OPA_TRANSP, LV_PART_MAIN);
-    lv_obj_set_style_border_width(calib_sel_row, 0, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(calib_sel_row, 0, LV_PART_MAIN);
-    lv_obj_set_style_pad_gap(calib_sel_row, 12, LV_PART_MAIN);
-    lv_obj_set_flex_flow(calib_sel_row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(calib_sel_row, LV_FLEX_ALIGN_START,
+    s_calib_sel_row = lv_obj_create(tab_calib);
+    lv_obj_set_size(s_calib_sel_row, SCREEN_W - 80, 48);
+    lv_obj_align(s_calib_sel_row, LV_ALIGN_TOP_LEFT, 0, 56);
+    lv_obj_set_style_bg_opa(s_calib_sel_row, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(s_calib_sel_row, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(s_calib_sel_row, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_gap(s_calib_sel_row, 8, LV_PART_MAIN);
+    lv_obj_set_flex_flow(s_calib_sel_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(s_calib_sel_row, LV_FLEX_ALIGN_START,
                           LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_clear_flag(calib_sel_row, LV_OBJ_FLAG_SCROLLABLE);
-
-    for (int i = 0; i < 2; i++) {
-        s_calib_pump_btn[i] = lv_btn_create(calib_sel_row);
-        lv_obj_set_size(s_calib_pump_btn[i], 170, 44);
-        lv_obj_set_style_radius(s_calib_pump_btn[i], 8, LV_PART_MAIN);
-        lv_obj_add_event_cb(s_calib_pump_btn[i], on_calib_pump_sel,
-                            LV_EVENT_CLICKED, (void *)(intptr_t)i);
-        lv_obj_t *lbl = lv_label_create(s_calib_pump_btn[i]);
-        lv_label_set_text(lbl, k_calib_pump_labels[i]);
-        lv_obj_center(lbl);
-    }
+    lv_obj_clear_flag(s_calib_sel_row, LV_OBJ_FLAG_SCROLLABLE);
+    rebuild_calib_pump_btns();
 
     lv_obj_t *qty_row = lv_obj_create(tab_calib);
     lv_obj_set_size(qty_row, 420, 56);
@@ -1354,18 +1689,132 @@ void scr_parameters_init(void)
     lv_obj_align(s_calib_status_lbl, LV_ALIGN_TOP_LEFT, 0, 260);
 
     s_calib_progress_lbl = lv_label_create(tab_calib);
-    lv_label_set_text(s_calib_progress_lbl, "Progression: P1 0.00 cL | P2 0.00 cL");
+    lv_label_set_text(s_calib_progress_lbl, "Progression: 0.00 cL");
     lv_obj_set_style_text_color(s_calib_progress_lbl,
                                 lv_color_hex(0xF5C518), LV_PART_MAIN);
     lv_obj_align(s_calib_progress_lbl, LV_ALIGN_TOP_LEFT, 0, 292);
 
     s_calib_constant_lbl = lv_label_create(tab_calib);
-    lv_label_set_text(s_calib_constant_lbl, "P1: 540.420 pulses/cL | P2: 2.800 cL/s");
+    lv_label_set_text(s_calib_constant_lbl, "P1: 540.420 pulses/cL (debitmetre)");
     lv_obj_set_style_text_color(s_calib_constant_lbl,
                                 lv_color_hex(0xEAEAEA), LV_PART_MAIN);
     lv_obj_align(s_calib_constant_lbl, LV_ALIGN_TOP_LEFT, 0, 324);
 
     update_calibration_ui();
+
+    /* ── Tab 5: Cocktails ─────────────────────────────────────────────── */
+    lv_obj_t *tab_ck = lv_tabview_add_tab(s_tabview,
+                                          LV_SYMBOL_LIST "  Cocktails");
+    lv_obj_set_style_bg_color(tab_ck, lv_color_hex(0x16213E), LV_PART_MAIN);
+    lv_obj_set_style_pad_all(tab_ck, 0, LV_PART_MAIN);
+
+    lv_obj_t *sc_ck = make_tab_scroll(tab_ck);
+
+    add_section_label(sc_ck, "Nouveau cocktail");
+
+    lv_obj_t *ck_add_row = lv_obj_create(sc_ck);
+    lv_obj_set_size(ck_add_row, SCREEN_INNER_W - 28, 54);
+    lv_obj_set_style_bg_opa(ck_add_row, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(ck_add_row, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(ck_add_row, 0, LV_PART_MAIN);
+    lv_obj_clear_flag(ck_add_row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(ck_add_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(ck_add_row, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_gap(ck_add_row, 10, LV_PART_MAIN);
+
+    s_ck_new_ta = lv_textarea_create(ck_add_row);
+    lv_obj_set_size(s_ck_new_ta, 580, 46);
+    lv_textarea_set_one_line(s_ck_new_ta, true);
+    lv_textarea_set_placeholder_text(s_ck_new_ta, "Nom du cocktail...");
+    lv_obj_add_event_cb(s_ck_new_ta, on_ta_focused, LV_EVENT_FOCUSED, NULL);
+
+    lv_obj_t *ck_add_btn = lv_btn_create(ck_add_row);
+    lv_obj_set_size(ck_add_btn, 200, 46);
+    lv_obj_set_style_bg_color(ck_add_btn, lv_color_hex(0x00C853), LV_PART_MAIN);
+    lv_obj_add_event_cb(ck_add_btn, on_ck_add_clicked, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *ck_add_lbl = lv_label_create(ck_add_btn);
+    lv_label_set_text(ck_add_lbl, LV_SYMBOL_PLUS "  Ajouter");
+    lv_obj_center(ck_add_lbl);
+
+    add_section_label(sc_ck, "Cocktails");
+
+    s_ck_list = lv_obj_create(sc_ck);
+    lv_obj_set_size(s_ck_list, SCREEN_INNER_W - 28, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(s_ck_list, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(s_ck_list, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(s_ck_list, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_gap(s_ck_list, 6, LV_PART_MAIN);
+    lv_obj_set_flex_flow(s_ck_list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_clear_flag(s_ck_list, LV_OBJ_FLAG_SCROLLABLE);
+
+    /* Recipe editor (hidden until a cocktail is selected) */
+    s_ck_editor = lv_obj_create(sc_ck);
+    lv_obj_set_size(s_ck_editor, SCREEN_INNER_W - 28, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_color(s_ck_editor, lv_color_hex(0x0F3460), LV_PART_MAIN);
+    lv_obj_set_style_border_width(s_ck_editor, 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(s_ck_editor, 8, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(s_ck_editor, 12, LV_PART_MAIN);
+    lv_obj_set_style_pad_gap(s_ck_editor, 8, LV_PART_MAIN);
+    lv_obj_set_flex_flow(s_ck_editor, LV_FLEX_FLOW_COLUMN);
+    lv_obj_clear_flag(s_ck_editor, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_ck_editor, LV_OBJ_FLAG_HIDDEN);
+
+    s_ck_editor_title = lv_label_create(s_ck_editor);
+    lv_label_set_text(s_ck_editor_title, "Recette");
+    lv_obj_set_style_text_color(s_ck_editor_title, lv_color_hex(0xF5C518), LV_PART_MAIN);
+
+    lv_obj_t *ck_hint = lv_label_create(s_ck_editor);
+    lv_label_set_text(ck_hint,
+        "Mode par pompe: Aucun (exclue), cL, % du verre, ou Roue (quantite de la roue).");
+    lv_obj_set_style_text_color(ck_hint, lv_color_hex(0x888888), LV_PART_MAIN);
+    lv_label_set_long_mode(ck_hint, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(ck_hint, SCREEN_INNER_W - 60);
+
+    for (int i = 0; i < GAME_DB_MAX_PUMPS; i++) {
+        s_ck_pump_row[i] = lv_obj_create(s_ck_editor);
+        lv_obj_set_size(s_ck_pump_row[i], SCREEN_INNER_W - 60, 52);
+        lv_obj_set_style_bg_opa(s_ck_pump_row[i], LV_OPA_TRANSP, LV_PART_MAIN);
+        lv_obj_set_style_border_width(s_ck_pump_row[i], 0, LV_PART_MAIN);
+        lv_obj_set_style_pad_all(s_ck_pump_row[i], 0, LV_PART_MAIN);
+        lv_obj_set_style_pad_gap(s_ck_pump_row[i], 10, LV_PART_MAIN);
+        lv_obj_clear_flag(s_ck_pump_row[i], LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_flex_flow(s_ck_pump_row[i], LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(s_ck_pump_row[i], LV_FLEX_ALIGN_START,
+                              LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+        char plbl[16];
+        lv_snprintf(plbl, sizeof(plbl), "Pompe %d", i + 1);
+        lv_obj_t *pl = lv_label_create(s_ck_pump_row[i]);
+        lv_label_set_text(pl, plbl);
+        lv_obj_set_style_text_color(pl, lv_color_hex(0xEAEAEA), LV_PART_MAIN);
+        lv_obj_set_width(pl, 120);
+
+        s_ck_mode_dd[i] = lv_dropdown_create(s_ck_pump_row[i]);
+        lv_dropdown_set_options(s_ck_mode_dd[i], "Aucun\ncL\n% verre\nRoue");
+        lv_obj_set_width(s_ck_mode_dd[i], 200);
+        lv_obj_add_event_cb(s_ck_mode_dd[i], on_ck_mode_changed,
+                            LV_EVENT_VALUE_CHANGED, (void *)(intptr_t)i);
+
+        s_ck_value_ta[i] = lv_textarea_create(s_ck_pump_row[i]);
+        lv_obj_set_size(s_ck_value_ta[i], 160, 44);
+        lv_textarea_set_one_line(s_ck_value_ta[i], true);
+        lv_textarea_set_placeholder_text(s_ck_value_ta[i], "cL / %");
+        lv_obj_add_event_cb(s_ck_value_ta[i], on_ta_focused, LV_EVENT_FOCUSED, NULL);
+    }
+
+    lv_obj_t *ck_save_btn = lv_btn_create(s_ck_editor);
+    lv_obj_set_size(ck_save_btn, 220, 48);
+    lv_obj_set_style_bg_color(ck_save_btn, lv_color_hex(0x00C853), LV_PART_MAIN);
+    lv_obj_set_style_radius(ck_save_btn, 8, LV_PART_MAIN);
+    lv_obj_add_event_cb(ck_save_btn, on_ck_save_clicked, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *ck_save_lbl = lv_label_create(ck_save_btn);
+    lv_label_set_text(ck_save_lbl, LV_SYMBOL_SAVE "  Enregistrer la recette");
+    lv_obj_center(ck_save_lbl);
+
+    s_ck_status_lbl = lv_label_create(s_ck_editor);
+    lv_label_set_text(s_ck_status_lbl, "");
+    lv_obj_set_style_text_color(s_ck_status_lbl, lv_color_hex(0x888888), LV_PART_MAIN);
 
     /* ── Keyboard overlay ──────────────────────────────────────────────── */
     s_kb = lv_keyboard_create(s_screen);

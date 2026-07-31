@@ -5,6 +5,7 @@
 #include "scr_home.h"
 #include "scr_profile_select.h"
 #include "scr_glass_select.h"
+#include "scr_cocktail_select.h"
 #include "scr_gaming.h"
 #include "scr_bonus_wheel.h"
 #include "scr_give_modifier.h"
@@ -25,6 +26,7 @@ static const screen_entry_t k_screens[SCREEN_COUNT] = {
     [SCREEN_HOME]           = { scr_home_get,           scr_home_refresh           },
     [SCREEN_PROFILE_SELECT] = { scr_profile_select_get, scr_profile_select_refresh },
     [SCREEN_GLASS_SELECT]   = { scr_glass_select_get,   scr_glass_select_refresh   },
+    [SCREEN_COCKTAIL_SELECT]= { scr_cocktail_select_get, scr_cocktail_select_refresh },
     [SCREEN_WHEEL]          = { scr_gaming_get,          scr_gaming_refresh         },
     [SCREEN_BONUS_WHEEL]    = { scr_bonus_wheel_get,    scr_bonus_wheel_refresh    },
     [SCREEN_GIVE_MODIFIER]  = { scr_give_modifier_get,  scr_give_modifier_refresh  },
@@ -155,6 +157,7 @@ void screen_manager_init(void)
     scr_home_init();
     scr_profile_select_init();
     scr_glass_select_init();
+    scr_cocktail_select_init();
     scr_gaming_init();
     scr_bonus_wheel_init();
     scr_give_modifier_init();

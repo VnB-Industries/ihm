@@ -8,6 +8,9 @@
 extern "C" {
 #endif
 
+/* Maximum pumps supported over the wire (must match firmware MAX_PUMPS). */
+#define SERIAL_MAX_PUMPS 6
+
 typedef enum {
 	SERIAL_CAL_EVENT_NONE = 0,
 	SERIAL_CAL_EVENT_STARTED,
@@ -19,9 +22,9 @@ typedef enum {
 
 typedef struct {
 	serial_cal_event_type_t type;
-	float pump1_value;
-	float pump2_value;
-	char raw_line[96];
+	int   pump_index;   /* 1-based pump the event refers to (STARTED/STOPPED*) */
+	float value;        /* progress cL, or the new flow constant for STOPPED*   */
+	char  raw_line[96];
 } serial_calibration_event_t;
 
 /* Open and configure the serial link to the microcontroller. */
@@ -33,15 +36,21 @@ void serial_comm_deinit(void);
 /* Send command DISPENSE:[PUMP1_CL]:[PUMP2_CL] where quantities are in cL. */
 bool serial_comm_send_dispense_cl(int pump1_cl, int pump2_cl);
 
+/* Send DISPENSE with @p count per-pump volumes (index order, cL). */
+bool serial_comm_send_dispense_cl_n(const int *pump_cl, int count);
+
 /* Send STOP command to immediately abort an in-progress dispense. */
 bool serial_comm_send_stop(void);
 
 /* Send runtime flow constants to the microcontroller.
+ * @p pump1_pulses_per_cl is pump 1's flow-meter constant.
+ * @p time_flow_cl_per_sec holds cL/s for pumps 2..N (@p time_count entries).
  * Returns true when the MCU acknowledges with SETFLOW:OK. */
 bool serial_comm_set_flow_constants(float pump1_pulses_per_cl,
-									float pump2_flow_cl_per_sec);
+									const float *time_flow_cl_per_sec,
+									int time_count);
 
-/* Start calibration run on a single pump (1 or 2) with target quantity in cL.
+/* Start calibration run on a single pump (1..N) with target quantity in cL.
  * Returns true when MCU acknowledges with CAL:STARTED. */
 bool serial_comm_start_calibration(int pump_index, float quantity_cl);
 

@@ -17,19 +17,33 @@
 
 static void sync_flow_constants_from_db(void)
 {
-    int pump1_scaled = db_get_config("pump1_pulses_per_cl_x1000", 540420);
-    int pump2_scaled = db_get_config("pump2_flow_clps_x1000", 2800);
+    int pump_count = db_get_config("pump_count", 2);
+    if (pump_count < 2) {
+        pump_count = 2;
+    }
+    if (pump_count > SERIAL_MAX_PUMPS) {
+        pump_count = SERIAL_MAX_PUMPS;
+    }
 
+    int pump1_scaled = db_get_config("pump1_pulses_per_cl_x1000", 540420);
     if (pump1_scaled <= 0) {
         pump1_scaled = 540420;
     }
-    if (pump2_scaled <= 0) {
-        pump2_scaled = 2800;
+    float pump1 = pump1_scaled / 1000.0f;
+
+    float time_flows[SERIAL_MAX_PUMPS - 1];
+    int time_count = pump_count - 1;
+    for (int i = 0; i < time_count; i++) {
+        char key[40];
+        snprintf(key, sizeof(key), "pump%d_flow_clps_x1000", i + 2);
+        int scaled = db_get_config(key, 2800);
+        if (scaled <= 0) {
+            scaled = 2800;
+        }
+        time_flows[i] = scaled / 1000.0f;
     }
 
-    float pump1 = pump1_scaled / 1000.0f;
-    float pump2 = pump2_scaled / 1000.0f;
-    if (!serial_comm_set_flow_constants(pump1, pump2)) {
+    if (!serial_comm_set_flow_constants(pump1, time_flows, time_count)) {
         fprintf(stderr, "[serial] flow constants sync failed: %s\n",
                 serial_comm_last_response());
     }

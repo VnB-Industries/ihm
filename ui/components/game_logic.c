@@ -8,12 +8,15 @@
 static int             s_active_user_id  = -1;
 static modifier_type_t s_pending_modifier = MODIFIER_NONE;
 static int             s_selected_glass_cl = 33;
+static int             s_selected_cocktail_id = -1;
 
 int             game_get_active_user(void)              { return s_active_user_id; }
 void            game_set_active_user(int id)            { s_active_user_id = id; }
 modifier_type_t game_get_pending_modifier(void)         { return s_pending_modifier; }
 void            game_set_pending_modifier(modifier_type_t m) { s_pending_modifier = m; }
 int             game_get_selected_glass_cl(void)        { return s_selected_glass_cl; }
+int             game_get_selected_cocktail_id(void)     { return s_selected_cocktail_id; }
+void            game_set_selected_cocktail_id(int id)   { s_selected_cocktail_id = id; }
 void            game_set_selected_glass_cl(int glass_cl)
 {
     if (glass_cl < 0) {

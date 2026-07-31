@@ -175,14 +175,55 @@ static void on_wheel_result(lv_obj_t *wf, uint16_t seg_index,
     play_confetti_once();
 #endif
 
-    int pump1_cl = (int)seg->value;
+    int wheel_cl = (int)seg->value;
     int glass_cl = game_get_selected_glass_cl();
-    int pump2_cl = glass_cl - pump1_cl;
-    if (pump2_cl < 0) {
-        pump2_cl = 0;
+    int pump_count = db_get_config("pump_count", 2);
+    if (pump_count < 2) pump_count = 2;
+    if (pump_count > GAME_DB_MAX_PUMPS) pump_count = GAME_DB_MAX_PUMPS;
+
+    int volumes[GAME_DB_MAX_PUMPS];
+    int used = 2;
+
+    if (pump_count == 2) {
+        /* Classic behaviour: wheel value into pump1, pump2 completes the glass. */
+        int pump2_cl = glass_cl - wheel_cl;
+        if (pump2_cl < 0) pump2_cl = 0;
+        volumes[0] = wheel_cl;
+        volumes[1] = pump2_cl;
+        used = 2;
+    } else {
+        /* Cocktail mode: resolve each pump from the selected recipe. */
+        for (int i = 0; i < pump_count; i++)
+            volumes[i] = 0;
+
+        cocktail_pump_t recipe[GAME_DB_MAX_PUMPS];
+        int rn = db_get_cocktail_pumps(game_get_selected_cocktail_id(),
+                                       recipe, GAME_DB_MAX_PUMPS);
+        for (int i = 0; i < rn; i++) {
+            int idx0 = recipe[i].pump_index - 1;
+            if (idx0 < 0 || idx0 >= pump_count) continue;
+            int cl = 0;
+            switch (recipe[i].mode) {
+                case COCKTAIL_QTY_CL:
+                    cl = recipe[i].value;
+                    break;
+                case COCKTAIL_QTY_PERCENT:
+                    cl = (glass_cl * recipe[i].value) / 100;
+                    break;
+                case COCKTAIL_QTY_WHEEL:
+                    cl = wheel_cl;
+                    break;
+                default:
+                    cl = 0;
+                    break;
+            }
+            if (cl < 0) cl = 0;
+            volumes[idx0] = cl;
+        }
+        used = pump_count;
     }
 
-    if (!serial_comm_send_dispense_cl(pump1_cl, pump2_cl)) {
+    if (!serial_comm_send_dispense_cl_n(volumes, used)) {
         const char *resp = serial_comm_last_response();
         if (resp && strcmp(resp, "ERROR:NO_OBJECT") == 0) {
             lv_label_set_text(s_result_label, LV_SYMBOL_WARNING " Place le verre puis reessaye");
@@ -193,12 +234,16 @@ static void on_wheel_result(lv_obj_t *wf, uint16_t seg_index,
         return;
     }
 
-    char buf[48];
-    lv_snprintf(buf, sizeof(buf),
-                "P1 %d cL | P2 %d cL", pump1_cl, pump2_cl);
+    char buf[96];
+    int off = 0;
+    for (int i = 0; i < used && off < (int)sizeof(buf); i++) {
+        off += lv_snprintf(buf + off, sizeof(buf) - off,
+                           "%sP%d %d cL", (i == 0 ? "" : " | "),
+                           i + 1, volumes[i]);
+    }
     lv_label_set_text(s_result_label, buf);
 
-    bool bonus_triggered = game_on_basic_spin(game_get_active_user(), pump1_cl);
+    bool bonus_triggered = game_on_basic_spin(game_get_active_user(), wheel_cl);
     if (bonus_triggered) {
         lv_obj_clear_flag(s_bonus_btn, LV_OBJ_FLAG_HIDDEN);
         /* Cooldown still applies after bonus wheel; will be checked on SCREEN_WHEEL re-entry */

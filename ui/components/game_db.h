@@ -11,6 +11,11 @@ extern "C" {
 #define GAME_DB_MAX_USERS  32
 #define GAME_DB_NAME_LEN   64
 
+/* Multi-pump limits (must match firmware MAX_PUMPS). */
+#define GAME_DB_MAX_PUMPS          6
+#define GAME_DB_MAX_COCKTAILS      32
+#define GAME_DB_COCKTAIL_NAME_LEN  48
+
 typedef struct {
     int     id;
     char    name[GAME_DB_NAME_LEN];
@@ -84,6 +89,44 @@ int  db_set_config(const char *key, int value);
 int  db_get_text_config(const char *key, char *out, int out_size,
                         const char *default_val);
 int  db_set_text_config(const char *key, const char *value);
+
+/* ── cocktails ─────────────────────────────────────────────────────────── */
+
+/** Per-pump quantity mode inside a cocktail recipe. */
+typedef enum {
+    COCKTAIL_QTY_CL      = 0,  /* value = absolute centiliters            */
+    COCKTAIL_QTY_PERCENT = 1,  /* value = percent of the selected glass   */
+    COCKTAIL_QTY_WHEEL   = 2   /* value ignored; quantity from wheel spin */
+} cocktail_qty_mode_t;
+
+typedef struct {
+    int pump_index;   /* 1-based pump number                    */
+    int mode;         /* cocktail_qty_mode_t                    */
+    int value;        /* cL or percent depending on mode        */
+} cocktail_pump_t;
+
+typedef struct {
+    int  id;
+    char name[GAME_DB_COCKTAIL_NAME_LEN];
+} cocktail_record_t;
+
+/** Fill @p buf with up to @p max_count cocktails ordered by name.
+ *  Returns number of rows written. */
+int  db_get_all_cocktails(cocktail_record_t *buf, int max_count);
+
+/** Insert a new cocktail. Returns the new row id, or -1 on error. */
+int  db_add_cocktail(const char *name);
+
+/** Delete a cocktail and its pump rows. Returns 0 on success. */
+int  db_delete_cocktail(int id);
+
+/** Fill @p buf with up to @p max_count pump rows for @p cocktail_id,
+ *  ordered by pump_index. Returns number of rows written. */
+int  db_get_cocktail_pumps(int cocktail_id, cocktail_pump_t *buf, int max_count);
+
+/** Replace the whole pump list of @p cocktail_id with @p pumps.
+ *  Returns 0 on success, -1 on error. */
+int  db_set_cocktail_pumps(int cocktail_id, const cocktail_pump_t *pumps, int count);
 
 #ifdef __cplusplus
 }

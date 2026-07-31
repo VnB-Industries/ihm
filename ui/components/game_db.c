@@ -98,6 +98,28 @@ int db_init(const char *path)
         ");"
     );
 
+    exec_sql(
+        "CREATE TABLE IF NOT EXISTS cocktails ("
+        "  id   INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  name TEXT    NOT NULL UNIQUE COLLATE NOCASE"
+        ");"
+    );
+
+    exec_sql(
+        "CREATE TABLE IF NOT EXISTS cocktail_pumps ("
+        "  id          INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  cocktail_id INTEGER NOT NULL,"
+        "  pump_index  INTEGER NOT NULL,"
+        "  mode        INTEGER NOT NULL DEFAULT 0,"
+        "  value       INTEGER NOT NULL DEFAULT 0,"
+        "  FOREIGN KEY(cocktail_id) REFERENCES cocktails(id) ON DELETE CASCADE"
+        ");"
+    );
+    exec_sql(
+        "CREATE INDEX IF NOT EXISTS idx_cocktail_pumps_cocktail"
+        " ON cocktail_pumps(cocktail_id);"
+    );
+
     /* Insert default config values (ignored if already present) */
     exec_sql(
         "INSERT OR IGNORE INTO game_config (key, value) VALUES"
@@ -111,6 +133,7 @@ int db_init(const char *path)
         "  ('max_malus_stack',                   5),"
         "  ('spin_cooldown_seconds',             0),"
         "  ('timeout_modifier_minutes',          5),"
+        "  ('pump_count',                        2),"
         "  ('pump1_pulses_per_cl_x1000',    540420),"
         "  ('pump2_flow_clps_x1000',          2800);"
     );
@@ -395,4 +418,118 @@ int db_set_user_rfid(int user_id, const char *tag)
     int rc = (sqlite3_step(stmt) == SQLITE_DONE) ? 0 : -1;
     sqlite3_finalize(stmt);
     return rc;
+}
+
+/* ── cocktails ─────────────────────────────────────────────────────────── */
+
+int db_get_all_cocktails(cocktail_record_t *buf, int max_count)
+{
+    if (!s_db || !buf || max_count <= 0) return 0;
+
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(s_db,
+            "SELECT id, name FROM cocktails ORDER BY name;",
+            -1, &stmt, NULL) != SQLITE_OK) return 0;
+
+    int n = 0;
+    while (sqlite3_step(stmt) == SQLITE_ROW && n < max_count) {
+        buf[n].id = sqlite3_column_int(stmt, 0);
+        const char *nm = (const char *)sqlite3_column_text(stmt, 1);
+        strncpy(buf[n].name, nm ? nm : "", GAME_DB_COCKTAIL_NAME_LEN - 1);
+        buf[n].name[GAME_DB_COCKTAIL_NAME_LEN - 1] = '\0';
+        n++;
+    }
+
+    sqlite3_finalize(stmt);
+    return n;
+}
+
+int db_add_cocktail(const char *name)
+{
+    if (!s_db || !name || name[0] == '\0') return -1;
+
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(s_db, "INSERT INTO cocktails (name) VALUES (?);",
+                            -1, &stmt, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
+
+    int new_id = -1;
+    if (sqlite3_step(stmt) == SQLITE_DONE)
+        new_id = (int)sqlite3_last_insert_rowid(s_db);
+    sqlite3_finalize(stmt);
+    return new_id;
+}
+
+int db_delete_cocktail(int id)
+{
+    if (!s_db) return -1;
+
+    sqlite3_stmt *stmt = NULL;
+
+    /* Delete child pump rows first (foreign_keys pragma is not enabled). */
+    if (sqlite3_prepare_v2(s_db, "DELETE FROM cocktail_pumps WHERE cocktail_id=?;",
+                            -1, &stmt, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_int(stmt, 1, id);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+
+    if (sqlite3_prepare_v2(s_db, "DELETE FROM cocktails WHERE id=?;",
+                            -1, &stmt, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_int(stmt, 1, id);
+    int rc = (sqlite3_step(stmt) == SQLITE_DONE) ? 0 : -1;
+    sqlite3_finalize(stmt);
+    return rc;
+}
+
+int db_get_cocktail_pumps(int cocktail_id, cocktail_pump_t *buf, int max_count)
+{
+    if (!s_db || !buf || max_count <= 0) return 0;
+
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(s_db,
+            "SELECT pump_index, mode, value FROM cocktail_pumps"
+            " WHERE cocktail_id=? ORDER BY pump_index;",
+            -1, &stmt, NULL) != SQLITE_OK) return 0;
+    sqlite3_bind_int(stmt, 1, cocktail_id);
+
+    int n = 0;
+    while (sqlite3_step(stmt) == SQLITE_ROW && n < max_count) {
+        buf[n].pump_index = sqlite3_column_int(stmt, 0);
+        buf[n].mode       = sqlite3_column_int(stmt, 1);
+        buf[n].value      = sqlite3_column_int(stmt, 2);
+        n++;
+    }
+
+    sqlite3_finalize(stmt);
+    return n;
+}
+
+int db_set_cocktail_pumps(int cocktail_id, const cocktail_pump_t *pumps, int count)
+{
+    if (!s_db || (count > 0 && !pumps)) return -1;
+
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(s_db, "DELETE FROM cocktail_pumps WHERE cocktail_id=?;",
+                            -1, &stmt, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_int(stmt, 1, cocktail_id);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    for (int i = 0; i < count; i++) {
+        stmt = NULL;
+        if (sqlite3_prepare_v2(s_db,
+                "INSERT INTO cocktail_pumps (cocktail_id, pump_index, mode, value)"
+                " VALUES (?,?,?,?);",
+                -1, &stmt, NULL) != SQLITE_OK) return -1;
+        sqlite3_bind_int(stmt, 1, cocktail_id);
+        sqlite3_bind_int(stmt, 2, pumps[i].pump_index);
+        sqlite3_bind_int(stmt, 3, pumps[i].mode);
+        sqlite3_bind_int(stmt, 4, pumps[i].value);
+        int rc = (sqlite3_step(stmt) == SQLITE_DONE) ? 0 : -1;
+        sqlite3_finalize(stmt);
+        if (rc != 0) return -1;
+    }
+
+    return 0;
 }

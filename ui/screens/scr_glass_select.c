@@ -11,7 +11,10 @@ static void on_glass_clicked(lv_event_t *e)
 {
     int glass_cl = (int)(intptr_t)lv_event_get_user_data(e);
     game_set_selected_glass_cl(glass_cl);
-    screen_manager_load(SCREEN_WHEEL);
+    if (db_get_config("pump_count", 2) > 2)
+        screen_manager_load(SCREEN_COCKTAIL_SELECT);
+    else
+        screen_manager_load(SCREEN_WHEEL);
 }
 
 static void on_back_clicked(lv_event_t *e)

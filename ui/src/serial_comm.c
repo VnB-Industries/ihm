@@ -8,6 +8,7 @@
 #include <fcntl.h>
 #include <glob.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <termios.h>
 #include <time.h>
@@ -99,10 +100,10 @@ static bool serial_ensure_connected(void)
     return serial_comm_init();
 }
 
-static bool serial_parse_two_floats(const char *line, const char *prefix,
-                                    float *v1_out, float *v2_out)
+static bool serial_parse_floats(const char *line, const char *prefix,
+                                float *out, int max_out, int *count_out)
 {
-    if (!line || !prefix || !v1_out || !v2_out) {
+    if (!line || !prefix || !out || max_out <= 0 || !count_out) {
         return false;
     }
 
@@ -111,14 +112,27 @@ static bool serial_parse_two_floats(const char *line, const char *prefix,
         return false;
     }
 
-    float v1 = 0.0f;
-    float v2 = 0.0f;
-    if (sscanf(line + n, "%f:%f", &v1, &v2) != 2) {
-        return false;
+    const char *p = line + n;
+    int count = 0;
+    while (count < max_out) {
+        char *end = NULL;
+        float v = strtof(p, &end);
+        if (end == p) {
+            break;
+        }
+        out[count++] = v;
+        p = end;
+        if (*p == ':') {
+            p++;
+            continue;
+        }
+        break;
     }
 
-    *v1_out = v1;
-    *v2_out = v2;
+    if (count == 0) {
+        return false;
+    }
+    *count_out = count;
     return true;
 }
 
@@ -379,13 +393,20 @@ void serial_comm_deinit(void)
 
 bool serial_comm_send_dispense_cl(int pump1_cl, int pump2_cl)
 {
+    int vols[2] = { pump1_cl, pump2_cl };
+    return serial_comm_send_dispense_cl_n(vols, 2);
+}
+
+bool serial_comm_send_dispense_cl_n(const int *pump_cl, int count)
+{
     s_last_response[0] = '\0';
 
-    if (pump1_cl < 0) {
-        pump1_cl = 0;
+    if (!pump_cl || count < 1) {
+        snprintf(s_last_response, sizeof(s_last_response), "IO:FORMAT");
+        return false;
     }
-    if (pump2_cl < 0) {
-        pump2_cl = 0;
+    if (count > SERIAL_MAX_PUMPS) {
+        count = SERIAL_MAX_PUMPS;
     }
 
     if (s_serial_fd < 0 && !serial_comm_init()) {
@@ -401,12 +422,24 @@ bool serial_comm_send_dispense_cl(int pump1_cl, int pump2_cl)
     tcflush(s_serial_fd, TCIFLUSH);
     s_rx_len = 0;   /* also discard any partially buffered line */
 
-    char command[64];
-    int n = snprintf(command, sizeof(command), "DISPENSE:%d:%d\n", pump1_cl, pump2_cl);
-    if (n < 0 || n >= (int)sizeof(command)) {
+    char command[128];
+    int off = snprintf(command, sizeof(command), "DISPENSE");
+    for (int i = 0; i < count; i++) {
+        int v = pump_cl[i] < 0 ? 0 : pump_cl[i];
+        int w = snprintf(command + off, sizeof(command) - off, ":%d", v);
+        if (w < 0 || w >= (int)sizeof(command) - off) {
+            snprintf(s_last_response, sizeof(s_last_response), "IO:FORMAT");
+            return false;
+        }
+        off += w;
+    }
+    int w = snprintf(command + off, sizeof(command) - off, "\n");
+    if (w < 0 || w >= (int)sizeof(command) - off) {
         snprintf(s_last_response, sizeof(s_last_response), "IO:FORMAT");
         return false;
     }
+    off += w;
+    int n = off;
 
     for (int attempt = 0; attempt < 2; attempt++) {
         const long ack_timeout_ms = (attempt == 0) ? 2000L : 3500L;
@@ -561,13 +594,26 @@ bool serial_comm_send_stop(void)
 }
 
 bool serial_comm_set_flow_constants(float pump1_pulses_per_cl,
-                                    float pump2_flow_cl_per_sec)
+                                    const float *time_flow_cl_per_sec,
+                                    int time_count)
 {
     s_last_response[0] = '\0';
 
-    if (pump1_pulses_per_cl <= 0.0f || pump2_flow_cl_per_sec <= 0.0f) {
+    if (pump1_pulses_per_cl <= 0.0f) {
         snprintf(s_last_response, sizeof(s_last_response), "ERROR:INVALID_CONSTANTS");
         return false;
+    }
+    if (time_count < 0) {
+        time_count = 0;
+    }
+    if (time_count > SERIAL_MAX_PUMPS - 1) {
+        time_count = SERIAL_MAX_PUMPS - 1;
+    }
+    for (int i = 0; i < time_count; i++) {
+        if (!time_flow_cl_per_sec || time_flow_cl_per_sec[i] <= 0.0f) {
+            snprintf(s_last_response, sizeof(s_last_response), "ERROR:INVALID_CONSTANTS");
+            return false;
+        }
     }
 
     if (!serial_ensure_connected()) {
@@ -579,13 +625,24 @@ bool serial_comm_set_flow_constants(float pump1_pulses_per_cl,
     s_rx_len = 0;
     s_rx_buf[0] = '\0';
 
-    char command[96];
-    int n = snprintf(command, sizeof(command), "SETFLOW:%.3f:%.3f\n",
-                     pump1_pulses_per_cl, pump2_flow_cl_per_sec);
-    if (n < 0 || n >= (int)sizeof(command)) {
+    char command[128];
+    int off = snprintf(command, sizeof(command), "SETFLOW:%.3f", pump1_pulses_per_cl);
+    for (int i = 0; i < time_count; i++) {
+        int w = snprintf(command + off, sizeof(command) - off, ":%.3f",
+                         time_flow_cl_per_sec[i]);
+        if (w < 0 || w >= (int)sizeof(command) - off) {
+            snprintf(s_last_response, sizeof(s_last_response), "IO:FORMAT");
+            return false;
+        }
+        off += w;
+    }
+    int w = snprintf(command + off, sizeof(command) - off, "\n");
+    if (w < 0 || w >= (int)sizeof(command) - off) {
         snprintf(s_last_response, sizeof(s_last_response), "IO:FORMAT");
         return false;
     }
+    off += w;
+    int n = off;
 
     for (int attempt = 0; attempt < 2; attempt++) {
         const long ack_timeout_ms = (attempt == 0) ? 2000L : 3500L;
@@ -668,7 +725,7 @@ bool serial_comm_start_calibration(int pump_index, float quantity_cl)
 {
     s_last_response[0] = '\0';
 
-    if ((pump_index != 1 && pump_index != 2) || quantity_cl <= 0.0f) {
+    if (pump_index < 1 || pump_index > SERIAL_MAX_PUMPS || quantity_cl <= 0.0f) {
         snprintf(s_last_response, sizeof(s_last_response), "ERROR:INVALID_CALIBRATION");
         return false;
     }
@@ -764,45 +821,48 @@ bool serial_comm_read_calibration_event(serial_calibration_event_t *out)
 
     char line[96];
     while (serial_read_next_line_nonblocking(line, sizeof(line))) {
-        float v1 = 0.0f;
-        float v2 = 0.0f;
+        float vals[SERIAL_MAX_PUMPS];
+        int count = 0;
 
-        if (serial_parse_two_floats(line, "PROGRESS:", &v1, &v2)) {
-            out->type = SERIAL_CAL_EVENT_PROGRESS;
-            out->pump1_value = v1;
-            out->pump2_value = v2;
-            snprintf(out->raw_line, sizeof(out->raw_line), "%s", line);
-            return true;
-        }
-
-        if (serial_parse_two_floats(line, "CAL:STOPPED_BY_SENSOR:", &v1, &v2)) {
+        /* CAL:STOPPED* carries <pump_index>:<new_flow_constant>. */
+        if (serial_parse_floats(line, "CAL:STOPPED_BY_SENSOR:", vals, SERIAL_MAX_PUMPS, &count)) {
             out->type = SERIAL_CAL_EVENT_STOPPED_BY_SENSOR;
-            out->pump1_value = v1;
-            out->pump2_value = v2;
+            out->pump_index = (count >= 1) ? (int)vals[0] : 0;
+            out->value = (count >= 2) ? vals[1] : 0.0f;
             snprintf(out->raw_line, sizeof(out->raw_line), "%s", line);
             return true;
         }
 
-        if (serial_parse_two_floats(line, "CAL:STOPPED:", &v1, &v2)) {
+        if (serial_parse_floats(line, "CAL:STOPPED:", vals, SERIAL_MAX_PUMPS, &count)) {
             out->type = SERIAL_CAL_EVENT_STOPPED;
-            out->pump1_value = v1;
-            out->pump2_value = v2;
+            out->pump_index = (count >= 1) ? (int)vals[0] : 0;
+            out->value = (count >= 2) ? vals[1] : 0.0f;
             snprintf(out->raw_line, sizeof(out->raw_line), "%s", line);
             return true;
         }
 
-        if (strncmp(line, "CAL:STARTED:", 12) == 0) {
+        /* CAL:STARTED:<pump_index>:<target_cl>. */
+        if (serial_parse_floats(line, "CAL:STARTED:", vals, SERIAL_MAX_PUMPS, &count)) {
             out->type = SERIAL_CAL_EVENT_STARTED;
-            out->pump1_value = 0.0f;
-            out->pump2_value = 0.0f;
+            out->pump_index = (count >= 1) ? (int)vals[0] : 0;
+            out->value = (count >= 2) ? vals[1] : 0.0f;
+            snprintf(out->raw_line, sizeof(out->raw_line), "%s", line);
+            return true;
+        }
+
+        /* During calibration PROGRESS carries a single live-volume value. */
+        if (serial_parse_floats(line, "PROGRESS:", vals, SERIAL_MAX_PUMPS, &count)) {
+            out->type = SERIAL_CAL_EVENT_PROGRESS;
+            out->pump_index = 0;
+            out->value = (count >= 1) ? vals[0] : 0.0f;
             snprintf(out->raw_line, sizeof(out->raw_line), "%s", line);
             return true;
         }
 
         if (strncmp(line, "ERROR:", 6) == 0) {
             out->type = SERIAL_CAL_EVENT_ERROR;
-            out->pump1_value = 0.0f;
-            out->pump2_value = 0.0f;
+            out->pump_index = 0;
+            out->value = 0.0f;
             snprintf(out->raw_line, sizeof(out->raw_line), "%s", line);
             snprintf(s_last_response, sizeof(s_last_response), "%s", line);
             return true;
@@ -811,7 +871,7 @@ bool serial_comm_read_calibration_event(serial_calibration_event_t *out)
         if (strncmp(line, "RFID:", 5) == 0 || strncmp(line, "READY", 5) == 0
                 || strncmp(line, "NFC:", 4) == 0 || strncmp(line, "RESET_CAUSE:", 12) == 0
                 || strncmp(line, "STARTED:", 8) == 0 || strncmp(line, "STOPPED:", 8) == 0
-                || strncmp(line, "OK:", 3) == 0 || strncmp(line, "SETFLOW:OK:", 11) == 0) {
+                || strncmp(line, "OK:", 3) == 0 || strncmp(line, "SETFLOW:OK", 10) == 0) {
             fprintf(stderr, "[serial] telemetry: %s\n", line);
             continue;
         }

@@ -74,6 +74,8 @@ void            game_set_pending_modifier(modifier_type_t m);
 
 int             game_get_selected_glass_cl(void);
 void            game_set_selected_glass_cl(int glass_cl);
+int             game_get_selected_cocktail_id(void);
+void            game_set_selected_cocktail_id(int id);
 
 #ifdef __cplusplus
 }
