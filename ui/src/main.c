@@ -43,10 +43,7 @@ static void sync_flow_constants_from_db(void)
         time_flows[i] = scaled / 1000.0f;
     }
 
-    if (!serial_comm_set_flow_constants(pump1, time_flows, time_count)) {
-        fprintf(stderr, "[serial] flow constants sync failed: %s\n",
-                serial_comm_last_response());
-    }
+    serial_comm_set_dispense_constants(pump1, time_flows, time_count);
 }
 
 int main(void)
@@ -61,11 +58,11 @@ int main(void)
         return 1;
     }
 
+    /* Load constants into memory regardless of serial link availability. */
+    sync_flow_constants_from_db();
+
     if(!serial_comm_init()) {
-        /* Keep the UI running even when the microcontroller link is unavailable. */
         fprintf(stderr, "[serial] startup without USB serial link\n");
-    } else {
-        sync_flow_constants_from_db();
     }
 
     screen_manager_init();

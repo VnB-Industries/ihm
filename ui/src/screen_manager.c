@@ -102,7 +102,7 @@ static void rfid_tick(lv_timer_t *t)
         return;
     }
 
-    char tag[32];
+    char tag[32] = {0};
     bool got_tag = serial_comm_read_rfid(tag, sizeof(tag));
 
     /* ── Enrollment mode ── */

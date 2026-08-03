@@ -33,6 +33,11 @@ static long s_last_reconnect_attempt_ms = -10000;
 static char s_rx_buf[256];
 static int  s_rx_len = 0;
 
+/* ── flow constants embedded in every DISPENSE command ───────────────── */
+static float s_pump1_pulses_per_cl                    = 540.42f;
+static float s_time_flow_cl_per_sec[SERIAL_MAX_PUMPS] = { 2.8f, 2.8f, 2.8f, 2.8f, 2.8f, 2.8f };
+static int   s_time_flow_count                        = 1;
+
 static bool serial_pattern_has_glob(const char *pattern)
 {
     if (!pattern) return false;
@@ -391,6 +396,21 @@ void serial_comm_deinit(void)
     s_serial_device[0] = '\0';   /* allow re-scan on next init */
 }
 
+void serial_comm_set_dispense_constants(float pump1_pulses_per_cl,
+                                        const float *time_flow_cl_per_sec,
+                                        int time_count)
+{
+    if (pump1_pulses_per_cl > 0.0f)
+        s_pump1_pulses_per_cl = pump1_pulses_per_cl;
+    if (time_count < 0) time_count = 0;
+    if (time_count > SERIAL_MAX_PUMPS - 1) time_count = SERIAL_MAX_PUMPS - 1;
+    for (int i = 0; i < time_count; i++) {
+        if (time_flow_cl_per_sec && time_flow_cl_per_sec[i] > 0.0f)
+            s_time_flow_cl_per_sec[i] = time_flow_cl_per_sec[i];
+    }
+    s_time_flow_count = time_count;
+}
+
 bool serial_comm_send_dispense_cl(int pump1_cl, int pump2_cl)
 {
     int vols[2] = { pump1_cl, pump2_cl };
@@ -422,11 +442,15 @@ bool serial_comm_send_dispense_cl_n(const int *pump_cl, int count)
     tcflush(s_serial_fd, TCIFLUSH);
     s_rx_len = 0;   /* also discard any partially buffered line */
 
-    char command[128];
+    char command[256];
     int off = snprintf(command, sizeof(command), "DISPENSE");
     for (int i = 0; i < count; i++) {
         int v = pump_cl[i] < 0 ? 0 : pump_cl[i];
-        int w = snprintf(command + off, sizeof(command) - off, ":%d", v);
+        float flow = (i == 0) ? s_pump1_pulses_per_cl
+                               : ((i - 1 < s_time_flow_count)
+                                      ? s_time_flow_cl_per_sec[i - 1]
+                                      : 2.8f);
+        int w = snprintf(command + off, sizeof(command) - off, ":%d:%.3f", v, flow);
         if (w < 0 || w >= (int)sizeof(command) - off) {
             snprintf(s_last_response, sizeof(s_last_response), "IO:FORMAT");
             return false;
@@ -523,7 +547,6 @@ bool serial_comm_send_dispense_cl_n(const int *pump_cl, int count)
             char *calStarted = strstr(response, "CAL:STARTED");
             char *calStopped = strstr(response, "CAL:STOPPED");
             char *calStoppedBySensor = strstr(response, "CAL:STOPPED_BY_SENSOR:");
-            char *setflowOk = strstr(response, "SETFLOW:OK:");
 
             const char *line = response;
             if (started) line = started;
@@ -538,7 +561,6 @@ bool serial_comm_send_dispense_cl_n(const int *pump_cl, int count)
             else if (calStarted) line = calStarted;
             else if (calStoppedBySensor) line = calStoppedBySensor;
             else if (calStopped) line = calStopped;
-            else if (setflowOk) line = setflowOk;
 
             fprintf(stderr, "[serial] response: %s\n", line);
 
@@ -554,7 +576,7 @@ bool serial_comm_send_dispense_cl_n(const int *pump_cl, int count)
             }
 
             if (rfid || ready || nfc || resetCause || progress || ok || stopped
-                    || calStarted || calStoppedBySensor || calStopped || setflowOk) {
+                    || calStarted || calStoppedBySensor || calStopped) {
                 if (ready || nfc || resetCause)
                     saw_boot_banner = true;
                 fprintf(stderr, "[serial] ignoring unsolicited line: %s\n", line);
@@ -591,134 +613,6 @@ bool serial_comm_send_stop(void)
     }
     fprintf(stderr, "[serial] STOP sent\n");
     return true;
-}
-
-bool serial_comm_set_flow_constants(float pump1_pulses_per_cl,
-                                    const float *time_flow_cl_per_sec,
-                                    int time_count)
-{
-    s_last_response[0] = '\0';
-
-    if (pump1_pulses_per_cl <= 0.0f) {
-        snprintf(s_last_response, sizeof(s_last_response), "ERROR:INVALID_CONSTANTS");
-        return false;
-    }
-    if (time_count < 0) {
-        time_count = 0;
-    }
-    if (time_count > SERIAL_MAX_PUMPS - 1) {
-        time_count = SERIAL_MAX_PUMPS - 1;
-    }
-    for (int i = 0; i < time_count; i++) {
-        if (!time_flow_cl_per_sec || time_flow_cl_per_sec[i] <= 0.0f) {
-            snprintf(s_last_response, sizeof(s_last_response), "ERROR:INVALID_CONSTANTS");
-            return false;
-        }
-    }
-
-    if (!serial_ensure_connected()) {
-        snprintf(s_last_response, sizeof(s_last_response), "IO:INIT");
-        return false;
-    }
-
-    tcflush(s_serial_fd, TCIFLUSH);
-    s_rx_len = 0;
-    s_rx_buf[0] = '\0';
-
-    char command[128];
-    int off = snprintf(command, sizeof(command), "SETFLOW:%.3f", pump1_pulses_per_cl);
-    for (int i = 0; i < time_count; i++) {
-        int w = snprintf(command + off, sizeof(command) - off, ":%.3f",
-                         time_flow_cl_per_sec[i]);
-        if (w < 0 || w >= (int)sizeof(command) - off) {
-            snprintf(s_last_response, sizeof(s_last_response), "IO:FORMAT");
-            return false;
-        }
-        off += w;
-    }
-    int w = snprintf(command + off, sizeof(command) - off, "\n");
-    if (w < 0 || w >= (int)sizeof(command) - off) {
-        snprintf(s_last_response, sizeof(s_last_response), "IO:FORMAT");
-        return false;
-    }
-    off += w;
-    int n = off;
-
-    for (int attempt = 0; attempt < 2; attempt++) {
-        const long ack_timeout_ms = (attempt == 0) ? 2000L : 3500L;
-        bool saw_boot_banner = false;
-
-        if (write(s_serial_fd, command, (size_t)n) != n) {
-            snprintf(s_last_response, sizeof(s_last_response), "IO:WRITE");
-            return false;
-        }
-
-        if (tcdrain(s_serial_fd) != 0) {
-            snprintf(s_last_response, sizeof(s_last_response), "IO:DRAIN");
-            return false;
-        }
-
-        struct timespec start_ts;
-        if (clock_gettime(CLOCK_MONOTONIC, &start_ts) != 0) {
-            snprintf(s_last_response, sizeof(s_last_response), "IO:CLOCK");
-            return false;
-        }
-
-        while (1) {
-            struct timespec now_ts;
-            if (clock_gettime(CLOCK_MONOTONIC, &now_ts) != 0) {
-                snprintf(s_last_response, sizeof(s_last_response), "IO:CLOCK");
-                return false;
-            }
-
-            long elapsed_ms = (now_ts.tv_sec - start_ts.tv_sec) * 1000L
-                            + (now_ts.tv_nsec - start_ts.tv_nsec) / 1000000L;
-            long remaining_ms = ack_timeout_ms - elapsed_ms;
-            if (remaining_ms <= 0) {
-                if (saw_boot_banner && attempt == 0) {
-                    tcflush(s_serial_fd, TCIFLUSH);
-                    usleep(1200000);
-                    break;
-                }
-                snprintf(s_last_response, sizeof(s_last_response), "TIMEOUT");
-                return false;
-            }
-
-            char response[96];
-            if (!serial_read_line_with_timeout(response, sizeof(response), (int)remaining_ms)) {
-                if (saw_boot_banner && attempt == 0) {
-                    tcflush(s_serial_fd, TCIFLUSH);
-                    usleep(1200000);
-                    break;
-                }
-                snprintf(s_last_response, sizeof(s_last_response), "TIMEOUT");
-                return false;
-            }
-
-            char *ok = strstr(response, "SETFLOW:OK:");
-            char *err = strstr(response, "ERROR:");
-            char *ready = strstr(response, "READY");
-            char *resetCause = strstr(response, "RESET_CAUSE:");
-            char *nfc = strstr(response, "NFC:");
-
-            const char *line = ok ? ok : (err ? err : response);
-            if (ok) {
-                snprintf(s_last_response, sizeof(s_last_response), "%s", line);
-                return true;
-            }
-            if (err) {
-                snprintf(s_last_response, sizeof(s_last_response), "%s", line);
-                return false;
-            }
-            if (ready || resetCause || nfc) {
-                saw_boot_banner = true;
-            }
-            fprintf(stderr, "[serial] ignoring unsolicited line: %s\n", response);
-        }
-    }
-
-    snprintf(s_last_response, sizeof(s_last_response), "TIMEOUT");
-    return false;
 }
 
 bool serial_comm_start_calibration(int pump_index, float quantity_cl)
@@ -871,7 +765,7 @@ bool serial_comm_read_calibration_event(serial_calibration_event_t *out)
         if (strncmp(line, "RFID:", 5) == 0 || strncmp(line, "READY", 5) == 0
                 || strncmp(line, "NFC:", 4) == 0 || strncmp(line, "RESET_CAUSE:", 12) == 0
                 || strncmp(line, "STARTED:", 8) == 0 || strncmp(line, "STOPPED:", 8) == 0
-                || strncmp(line, "OK:", 3) == 0 || strncmp(line, "SETFLOW:OK", 10) == 0) {
+                || strncmp(line, "OK:", 3) == 0) {
             fprintf(stderr, "[serial] telemetry: %s\n", line);
             continue;
         }

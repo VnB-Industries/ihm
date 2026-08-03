@@ -474,7 +474,8 @@ static bool push_calibration_constants(void)
     if (tc < 0) tc = 0;
     for (int i = 0; i < tc; i++)
         time_flows[i] = s_calib_flow[i + 1];
-    return serial_comm_set_flow_constants(s_calib_flow[0], time_flows, tc);
+    serial_comm_set_dispense_constants(s_calib_flow[0], time_flows, tc);
+    return true;
 }
 
 static void update_calibration_pump_btns(void)

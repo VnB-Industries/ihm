@@ -33,7 +33,7 @@ bool serial_comm_init(void);
 /* Close the serial link if currently open. */
 void serial_comm_deinit(void);
 
-/* Send command DISPENSE:[PUMP1_CL]:[PUMP2_CL] where quantities are in cL. */
+/* Send DISPENSE for 2 pumps (convenience wrapper around serial_comm_send_dispense_cl_n). */
 bool serial_comm_send_dispense_cl(int pump1_cl, int pump2_cl);
 
 /* Send DISPENSE with @p count per-pump volumes (index order, cL). */
@@ -42,11 +42,9 @@ bool serial_comm_send_dispense_cl_n(const int *pump_cl, int count);
 /* Send STOP command to immediately abort an in-progress dispense. */
 bool serial_comm_send_stop(void);
 
-/* Send runtime flow constants to the microcontroller.
- * @p pump1_pulses_per_cl is pump 1's flow-meter constant.
- * @p time_flow_cl_per_sec holds cL/s for pumps 2..N (@p time_count entries).
- * Returns true when the MCU acknowledges with SETFLOW:OK. */
-bool serial_comm_set_flow_constants(float pump1_pulses_per_cl,
+/* Store flow constants used when building DISPENSE commands; no serial exchange.
+ * Call at startup and after any calibration update. */
+void serial_comm_set_dispense_constants(float pump1_pulses_per_cl,
 									const float *time_flow_cl_per_sec,
 									int time_count);
 
