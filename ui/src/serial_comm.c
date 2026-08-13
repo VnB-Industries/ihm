@@ -465,6 +465,8 @@ bool serial_comm_send_dispense_cl_n(const int *pump_cl, int count)
     off += w;
     int n = off;
 
+    fprintf(stderr, "[serial] tx: %s", command);
+
     for (int attempt = 0; attempt < 2; attempt++) {
         const long ack_timeout_ms = (attempt == 0) ? 2000L : 3500L;
 

@@ -718,6 +718,9 @@ static void on_save_clicked(lv_event_t *e)
     for (int i = 0; i < s_pump_count; i++)
         save_calib_flow(i);
 
+    /* Without this, DISPENSE commands keep using stale constants until app restart. */
+    push_calibration_constants();
+
     db_set_text_config("home_banner_text_1", lv_textarea_get_text(s_banner_ta_1));
     db_set_text_config("home_banner_text_2", lv_textarea_get_text(s_banner_ta_2));
     db_set_text_config("home_banner_text_3", lv_textarea_get_text(s_banner_ta_3));
@@ -1320,8 +1323,17 @@ static void on_ck_save_clicked(lv_event_t *e)
         int value = 0;
         if (mode != COCKTAIL_QTY_WHEEL) {
             const char *vt = lv_textarea_get_text(s_ck_value_ta[i]);
-            value = (vt && vt[0]) ? atoi(vt) : 0;
-            if (value < 0) value = 0;
+            /* An empty/zero cL or % field would silently dispense nothing for this pump. */
+            if (!vt || !vt[0] || atoi(vt) <= 0) {
+                char msg[64];
+                lv_snprintf(msg, sizeof(msg),
+                            LV_SYMBOL_WARNING "  Valeur manquante (pompe %d)", i + 1);
+                lv_label_set_text(s_ck_status_lbl, msg);
+                lv_obj_set_style_text_color(s_ck_status_lbl,
+                                            lv_color_hex(0xE94560), LV_PART_MAIN);
+                return;
+            }
+            value = atoi(vt);
         }
         pumps[n].pump_index = i + 1;
         pumps[n].mode = mode;

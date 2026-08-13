@@ -223,6 +223,22 @@ static void on_wheel_result(lv_obj_t *wf, uint16_t seg_index,
         used = pump_count;
     }
 
+    fprintf(stderr, "[gaming] wheel_cl=%d glass_cl=%d pump_count=%d used=%d volumes=[",
+            wheel_cl, glass_cl, pump_count, used);
+    for (int i = 0; i < used; i++)
+        fprintf(stderr, "%s%d", (i == 0 ? "" : ","), volumes[i]);
+    fprintf(stderr, "]\n");
+
+    bool any_volume = false;
+    for (int i = 0; i < used; i++)
+        if (volumes[i] > 0) any_volume = true;
+    if (!any_volume) {
+        /* Catches a cocktail recipe with no configured quantities, not a serial failure. */
+        lv_label_set_text(s_result_label, LV_SYMBOL_WARNING " Cocktail non configure");
+        set_spin_btn_enabled(true);
+        return;
+    }
+
     if (!serial_comm_send_dispense_cl_n(volumes, used)) {
         const char *resp = serial_comm_last_response();
         if (resp && strcmp(resp, "ERROR:NO_OBJECT") == 0) {
