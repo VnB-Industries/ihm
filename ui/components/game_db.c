@@ -2,8 +2,104 @@
 #include <sqlite3.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 static sqlite3 *s_db = NULL;
+
+/* ── prepared-statement cache ───────────────────────────────────────────────
+ * Every query owns a file-static slot that holds its compiled statement.
+ * stmt_prep() compiles on first use and only resets afterwards, so the hot
+ * paths (db_get_user, db_update_user, db_get_config) stop re-compiling SQL on
+ * each call.  Slots are registered here so db_close() can finalize them all.  */
+
+#define DB_STMT_SLOTS 32
+static sqlite3_stmt **s_stmt_slots[DB_STMT_SLOTS];
+static int            s_stmt_slot_count = 0;
+
+/* Return a statement for @p sql, ready to be bound.
+ * @p slot must be a file-static pointer, one per distinct @p sql. */
+static sqlite3_stmt *stmt_prep(sqlite3_stmt **slot, const char *sql)
+{
+    if (!s_db || !slot) return NULL;
+
+    if (*slot) {
+        sqlite3_reset(*slot);
+        sqlite3_clear_bindings(*slot);
+        return *slot;
+    }
+
+    if (sqlite3_prepare_v2(s_db, sql, -1, slot, NULL) != SQLITE_OK) {
+        fprintf(stderr, "[db] prepare failed (%s): %s\n", sql, sqlite3_errmsg(s_db));
+        *slot = NULL;
+        return NULL;
+    }
+
+    if (s_stmt_slot_count < DB_STMT_SLOTS) {
+        s_stmt_slots[s_stmt_slot_count++] = slot;
+    } else {
+        /* Statement still works; it just leaks until the process exits. */
+        fprintf(stderr, "[db] statement slot registry full, raise DB_STMT_SLOTS\n");
+    }
+
+    return *slot;
+}
+
+static void stmt_finalize_all(void)
+{
+    for (int i = 0; i < s_stmt_slot_count; i++) {
+        if (s_stmt_slots[i] && *s_stmt_slots[i]) {
+            sqlite3_finalize(*s_stmt_slots[i]);
+            *s_stmt_slots[i] = NULL;
+        }
+        s_stmt_slots[i] = NULL;
+    }
+    s_stmt_slot_count = 0;
+}
+
+/* ── integer-config cache ───────────────────────────────────────────────────
+ * game_config is read far more often than written (the wheel rebuilds read
+ * five weights every spin).  Values are cached on first read and refreshed by
+ * db_set_config, which is the only writer in this process.                   */
+
+#define DB_CFG_CACHE_MAX 48
+#define DB_CFG_KEY_LEN   48
+
+typedef struct {
+    char key[DB_CFG_KEY_LEN];
+    int  value;
+} cfg_entry_t;
+
+static cfg_entry_t s_cfg_cache[DB_CFG_CACHE_MAX];
+static int         s_cfg_cache_count = 0;
+
+static cfg_entry_t *cfg_cache_find(const char *key)
+{
+    for (int i = 0; i < s_cfg_cache_count; i++) {
+        if (strncmp(s_cfg_cache[i].key, key, DB_CFG_KEY_LEN) == 0)
+            return &s_cfg_cache[i];
+    }
+    return NULL;
+}
+
+static void cfg_cache_put(const char *key, int value)
+{
+    cfg_entry_t *e = cfg_cache_find(key);
+    if (e) { e->value = value; return; }
+
+    if (s_cfg_cache_count >= DB_CFG_CACHE_MAX) {
+        fprintf(stderr, "[db] config cache full, raise DB_CFG_CACHE_MAX\n");
+        return;
+    }
+
+    e = &s_cfg_cache[s_cfg_cache_count++];
+    snprintf(e->key, sizeof(e->key), "%s", key);
+    e->value = value;
+}
+
+static void cfg_cache_clear(void)
+{
+    s_cfg_cache_count = 0;
+}
 
 /* ── internal helpers ───────────────────────────────────────────────────── */
 
@@ -24,6 +120,13 @@ static void exec_sql_quiet(const char *sql)
     sqlite3_exec(s_db, sql, NULL, NULL, NULL);
 }
 
+/* Like exec_sql_quiet but reports the result, so a migration can tell the
+ * difference between "already applied" and "applied just now". */
+static int exec_sql_quiet_rc(const char *sql)
+{
+    return sqlite3_exec(s_db, sql, NULL, NULL, NULL);
+}
+
 static void fill_user(sqlite3_stmt *stmt, user_record_t *u)
 {
     u->id             = sqlite3_column_int(stmt, 0);
@@ -41,11 +144,25 @@ static void fill_user(sqlite3_stmt *stmt, user_record_t *u)
     const char *tag = (const char *)sqlite3_column_text(stmt, 10);
     strncpy(u->rfid_tag, tag ? tag : "", sizeof(u->rfid_tag) - 1);
     u->rfid_tag[sizeof(u->rfid_tag) - 1] = '\0';
+    u->spin_blocked_until = sqlite3_column_int64(stmt, 11);
 }
 
-static const char k_user_select[] =
+
+/* Full statement text per query.  Spelling each one out instead of
+ * concatenating a shared SELECT prefix at runtime keeps the statement text
+ * constant, which is what the statement cache keys on. */
+static const char k_sql_users_all[] =
     "SELECT id, name, is_admin, bonus, malus, wheel_trigger, total_cl,"
-    "       given_modifier, given_to_id, last_spin_epoch, rfid_tag FROM users";
+    "       given_modifier, given_to_id, last_spin_epoch, rfid_tag,"
+    "       spin_blocked_until FROM users ORDER BY name;";
+static const char k_sql_user_by_id[] =
+    "SELECT id, name, is_admin, bonus, malus, wheel_trigger, total_cl,"
+    "       given_modifier, given_to_id, last_spin_epoch, rfid_tag,"
+    "       spin_blocked_until FROM users WHERE id = ?;";
+static const char k_sql_user_by_rfid[] =
+    "SELECT id, name, is_admin, bonus, malus, wheel_trigger, total_cl,"
+    "       given_modifier, given_to_id, last_spin_epoch, rfid_tag,"
+    "       spin_blocked_until FROM users WHERE rfid_tag = ?;";
 
 /* ── public API ─────────────────────────────────────────────────────────── */
 
@@ -55,6 +172,15 @@ int db_init(const char *path)
         fprintf(stderr, "[db] Cannot open %s: %s\n", path, sqlite3_errmsg(s_db));
         return -1;
     }
+
+    /* ON DELETE CASCADE on cl_history and cocktail_pumps is inert unless this
+     * is enabled, and it is per-connection, not stored in the file. */
+    exec_sql("PRAGMA foreign_keys = ON;");
+
+    /* The machine is unplugged rather than shut down, so prefer the journal
+     * mode that survives that without an fsync on every single write. */
+    exec_sql_quiet("PRAGMA journal_mode = WAL;");
+    exec_sql_quiet("PRAGMA synchronous = NORMAL;");
 
     exec_sql(
         "CREATE TABLE IF NOT EXISTS users ("
@@ -133,6 +259,7 @@ int db_init(const char *path)
         "  ('max_malus_stack',                   5),"
         "  ('spin_cooldown_seconds',             0),"
         "  ('timeout_modifier_minutes',          5),"
+        "  ('cl_history_max_per_user',          500),"
         "  ('pump_count',                        2),"
         "  ('pump1_pulses_per_cl_x1000',    540420),"
         "  ('pump2_flow_clps_x1000',          2800);"
@@ -162,11 +289,32 @@ int db_init(const char *path)
         "ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0;"
     );
 
+    /* Schema migration: split the two meanings that used to share
+     * last_spin_epoch.  Older builds stored a *future* timestamp there to
+     * express "blocked until", which made the column lie about when the user
+     * actually spun.  When the column is created here for the first time,
+     * carry any such pending block over so active timeouts survive the
+     * upgrade, then clamp last_spin_epoch back to a real past value. */
+    if (exec_sql_quiet_rc(
+            "ALTER TABLE users ADD COLUMN"
+            " spin_blocked_until INTEGER NOT NULL DEFAULT 0;") == SQLITE_OK) {
+        exec_sql_quiet(
+            "UPDATE users SET spin_blocked_until = last_spin_epoch"
+            " WHERE last_spin_epoch > strftime('%s','now');"
+        );
+        exec_sql_quiet(
+            "UPDATE users SET last_spin_epoch = strftime('%s','now')"
+            " WHERE last_spin_epoch > strftime('%s','now');"
+        );
+    }
+
     return 0;
 }
 
 void db_close(void)
 {
+    stmt_finalize_all();
+    cfg_cache_clear();
     if (s_db) { sqlite3_close(s_db); s_db = NULL; }
 }
 
@@ -174,17 +322,15 @@ int db_get_all_users(user_record_t *buf, int max_count)
 {
     if (!s_db || !buf || max_count <= 0) return 0;
 
-    char sql[512];
-    snprintf(sql, sizeof(sql), "%s ORDER BY name;", k_user_select);
-
-    sqlite3_stmt *stmt = NULL;
-    if (sqlite3_prepare_v2(s_db, sql, -1, &stmt, NULL) != SQLITE_OK) return 0;
+    static sqlite3_stmt *st = NULL;
+    sqlite3_stmt *stmt = stmt_prep(&st, k_sql_users_all);
+    if (!stmt) return 0;
 
     int n = 0;
     while (sqlite3_step(stmt) == SQLITE_ROW && n < max_count)
         fill_user(stmt, &buf[n++]);
 
-    sqlite3_finalize(stmt);
+    sqlite3_reset(stmt);
     return n;
 }
 
@@ -192,16 +338,14 @@ int db_get_user(int id, user_record_t *out)
 {
     if (!s_db || !out) return -1;
 
-    char sql[512];
-    snprintf(sql, sizeof(sql), "%s WHERE id = ?;", k_user_select);
-
-    sqlite3_stmt *stmt = NULL;
-    if (sqlite3_prepare_v2(s_db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+    static sqlite3_stmt *st = NULL;
+    sqlite3_stmt *stmt = stmt_prep(&st, k_sql_user_by_id);
+    if (!stmt) return -1;
     sqlite3_bind_int(stmt, 1, id);
 
     int rc = -1;
     if (sqlite3_step(stmt) == SQLITE_ROW) { fill_user(stmt, out); rc = 0; }
-    sqlite3_finalize(stmt);
+    sqlite3_reset(stmt);
     return rc;
 }
 
@@ -209,15 +353,15 @@ int db_add_user(const char *name)
 {
     if (!s_db || !name || name[0] == '\0') return -1;
 
-    sqlite3_stmt *stmt = NULL;
-    if (sqlite3_prepare_v2(s_db, "INSERT INTO users (name) VALUES (?);",
-                            -1, &stmt, NULL) != SQLITE_OK) return -1;
+    static sqlite3_stmt *st = NULL;
+    sqlite3_stmt *stmt = stmt_prep(&st, "INSERT INTO users (name) VALUES (?);");
+    if (!stmt) return -1;
     sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
 
     int new_id = -1;
     if (sqlite3_step(stmt) == SQLITE_DONE)
         new_id = (int)sqlite3_last_insert_rowid(s_db);
-    sqlite3_finalize(stmt);
+    sqlite3_reset(stmt);
     return new_id;
 }
 
@@ -225,25 +369,36 @@ int db_update_user(const user_record_t *u)
 {
     if (!s_db || !u) return -1;
 
-    const char *sql =
-        "UPDATE users SET is_admin=?, bonus=?, malus=?, wheel_trigger=?, total_cl=?,"
-        "                 given_modifier=?, given_to_id=?, last_spin_epoch=?"
-        " WHERE id=?;";
+    static sqlite3_stmt *st = NULL;
+    sqlite3_stmt *stmt = stmt_prep(&st,
+        "UPDATE users SET name=?, is_admin=?, bonus=?, malus=?, wheel_trigger=?,"
+        "                 total_cl=?, given_modifier=?, given_to_id=?,"
+        "                 last_spin_epoch=?, spin_blocked_until=?, rfid_tag=?"
+        " WHERE id=?;");
+    if (!stmt) return -1;
 
-    sqlite3_stmt *stmt = NULL;
-    if (sqlite3_prepare_v2(s_db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
-    sqlite3_bind_int  (stmt, 1, u->is_admin ? 1 : 0);
-    sqlite3_bind_int  (stmt, 2, u->bonus);
-    sqlite3_bind_int  (stmt, 3, u->malus);
-    sqlite3_bind_int  (stmt, 4, u->wheel_trigger);
-    sqlite3_bind_int  (stmt, 5, u->total_cl);
-    sqlite3_bind_int  (stmt, 6, u->given_modifier);
-    sqlite3_bind_int  (stmt, 7, u->given_to_id);
-    sqlite3_bind_int64(stmt, 8, u->last_spin_epoch);
-    sqlite3_bind_int  (stmt, 9, u->id);
+    sqlite3_bind_text (stmt,  1, u->name, -1, SQLITE_STATIC);
+    sqlite3_bind_int  (stmt,  2, u->is_admin ? 1 : 0);
+    sqlite3_bind_int  (stmt,  3, u->bonus);
+    sqlite3_bind_int  (stmt,  4, u->malus);
+    sqlite3_bind_int  (stmt,  5, u->wheel_trigger);
+    sqlite3_bind_int  (stmt,  6, u->total_cl);
+    sqlite3_bind_int  (stmt,  7, u->given_modifier);
+    sqlite3_bind_int  (stmt,  8, u->given_to_id);
+    sqlite3_bind_int64(stmt,  9, u->last_spin_epoch);
+    sqlite3_bind_int64(stmt, 10, u->spin_blocked_until);
+    /* Store an unlinked tag as NULL: "" in a UNIQUE-ish lookup column would
+     * make every tagless user match a db_get_user_by_rfid("") probe. */
+    if (u->rfid_tag[0] != '\0')
+        sqlite3_bind_text(stmt, 11, u->rfid_tag, -1, SQLITE_STATIC);
+    else
+        sqlite3_bind_null(stmt, 11);
+    sqlite3_bind_int  (stmt, 12, u->id);
 
     int rc = (sqlite3_step(stmt) == SQLITE_DONE) ? 0 : -1;
-    sqlite3_finalize(stmt);
+    if (rc != 0)
+        fprintf(stderr, "[db] update user %d failed: %s\n", u->id, sqlite3_errmsg(s_db));
+    sqlite3_reset(stmt);
     return rc;
 }
 
@@ -251,13 +406,33 @@ int db_delete_user(int id)
 {
     if (!s_db) return -1;
 
-    sqlite3_stmt *stmt = NULL;
-    if (sqlite3_prepare_v2(s_db, "DELETE FROM users WHERE id=?;",
-                            -1, &stmt, NULL) != SQLITE_OK) return -1;
+    static sqlite3_stmt *st = NULL;
+    sqlite3_stmt *stmt = stmt_prep(&st, "DELETE FROM users WHERE id=?;");
+    if (!stmt) return -1;
     sqlite3_bind_int(stmt, 1, id);
 
     int rc = (sqlite3_step(stmt) == SQLITE_DONE) ? 0 : -1;
-    sqlite3_finalize(stmt);
+    sqlite3_reset(stmt);
+    return rc;
+}
+
+int db_prune_cl_history(int user_id, int keep)
+{
+    if (!s_db || keep <= 0) return 0;
+
+    static sqlite3_stmt *st = NULL;
+    sqlite3_stmt *stmt = stmt_prep(&st,
+        "DELETE FROM cl_history WHERE user_id = ? AND id NOT IN ("
+        "  SELECT id FROM cl_history WHERE user_id = ?"
+        "   ORDER BY epoch DESC, id DESC LIMIT ?);");
+    if (!stmt) return -1;
+
+    sqlite3_bind_int(stmt, 1, user_id);
+    sqlite3_bind_int(stmt, 2, user_id);
+    sqlite3_bind_int(stmt, 3, keep);
+
+    int rc = (sqlite3_step(stmt) == SQLITE_DONE) ? 0 : -1;
+    sqlite3_reset(stmt);
     return rc;
 }
 
@@ -265,16 +440,22 @@ int db_add_cl_history(int user_id, int64_t epoch, int total_cl)
 {
     if (!s_db) return -1;
 
-    sqlite3_stmt *stmt = NULL;
-    if (sqlite3_prepare_v2(s_db,
-            "INSERT INTO cl_history (user_id, epoch, total_cl) VALUES (?,?,?);",
-            -1, &stmt, NULL) != SQLITE_OK) return -1;
+    static sqlite3_stmt *st = NULL;
+    sqlite3_stmt *stmt = stmt_prep(&st,
+            "INSERT INTO cl_history (user_id, epoch, total_cl) VALUES (?,?,?);");
+    if (!stmt) return -1;
     sqlite3_bind_int  (stmt, 1, user_id);
     sqlite3_bind_int64(stmt, 2, epoch);
     sqlite3_bind_int  (stmt, 3, total_cl);
 
     int rc = (sqlite3_step(stmt) == SQLITE_DONE) ? 0 : -1;
-    sqlite3_finalize(stmt);
+    sqlite3_reset(stmt);
+
+    /* One row per spin would otherwise grow without bound for the lifetime of
+     * the machine, and the leaderboard reads every user's history on open. */
+    if (rc == 0)
+        db_prune_cl_history(user_id, db_get_config("cl_history_max_per_user", 500));
+
     return rc;
 }
 
@@ -282,11 +463,11 @@ int db_get_cl_history(int user_id, cl_history_point_t *buf, int max_count)
 {
     if (!s_db || !buf || max_count <= 0) return 0;
 
-    sqlite3_stmt *stmt = NULL;
-    if (sqlite3_prepare_v2(s_db,
+    static sqlite3_stmt *st = NULL;
+    sqlite3_stmt *stmt = stmt_prep(&st,
             "SELECT epoch, total_cl FROM cl_history"
-            " WHERE user_id = ? ORDER BY epoch ASC;",
-            -1, &stmt, NULL) != SQLITE_OK) return 0;
+            " WHERE user_id = ? ORDER BY epoch ASC;");
+    if (!stmt) return 0;
     sqlite3_bind_int(stmt, 1, user_id);
 
     int n = 0;
@@ -295,7 +476,7 @@ int db_get_cl_history(int user_id, cl_history_point_t *buf, int max_count)
         buf[n].total_cl = sqlite3_column_int(stmt, 1);
         n++;
     }
-    sqlite3_finalize(stmt);
+    sqlite3_reset(stmt);
     return n;
 }
 
@@ -303,15 +484,22 @@ int db_get_config(const char *key, int default_val)
 {
     if (!s_db || !key) return default_val;
 
-    sqlite3_stmt *stmt = NULL;
-    if (sqlite3_prepare_v2(s_db, "SELECT value FROM game_config WHERE key=?;",
-                            -1, &stmt, NULL) != SQLITE_OK) return default_val;
+    cfg_entry_t *cached = cfg_cache_find(key);
+    if (cached) return cached->value;
+
+    static sqlite3_stmt *st = NULL;
+    sqlite3_stmt *stmt = stmt_prep(&st, "SELECT value FROM game_config WHERE key=?;");
+    if (!stmt) return default_val;
     sqlite3_bind_text(stmt, 1, key, -1, SQLITE_STATIC);
 
     int val = default_val;
     if (sqlite3_step(stmt) == SQLITE_ROW)
         val = sqlite3_column_int(stmt, 0);
-    sqlite3_finalize(stmt);
+    sqlite3_reset(stmt);
+
+    /* Cache the resolved value, default included: a key absent from the table
+     * stays absent, so re-querying it on every call would buy nothing. */
+    cfg_cache_put(key, val);
     return val;
 }
 
@@ -319,16 +507,17 @@ int db_set_config(const char *key, int value)
 {
     if (!s_db || !key) return -1;
 
-    const char *sql =
-        "INSERT OR REPLACE INTO game_config (key, value) VALUES (?,?);";
-
-    sqlite3_stmt *stmt = NULL;
-    if (sqlite3_prepare_v2(s_db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+    static sqlite3_stmt *st = NULL;
+    sqlite3_stmt *stmt = stmt_prep(&st,
+        "INSERT OR REPLACE INTO game_config (key, value) VALUES (?,?);");
+    if (!stmt) return -1;
     sqlite3_bind_text(stmt, 1, key, -1, SQLITE_STATIC);
     sqlite3_bind_int(stmt, 2, value);
 
     int rc = (sqlite3_step(stmt) == SQLITE_DONE) ? 0 : -1;
-    sqlite3_finalize(stmt);
+    sqlite3_reset(stmt);
+
+    if (rc == 0) cfg_cache_put(key, value);
     return rc;
 }
 
@@ -345,12 +534,10 @@ int db_get_text_config(const char *key, char *out, int out_size,
 
     if (!s_db || !key) return -1;
 
-    sqlite3_stmt *stmt = NULL;
-    if (sqlite3_prepare_v2(s_db,
-            "SELECT value FROM game_text_config WHERE key=?;",
-            -1, &stmt, NULL) != SQLITE_OK) {
-        return -1;
-    }
+    static sqlite3_stmt *st = NULL;
+    sqlite3_stmt *stmt = stmt_prep(&st,
+            "SELECT value FROM game_text_config WHERE key=?;");
+    if (!stmt) return -1;
 
     sqlite3_bind_text(stmt, 1, key, -1, SQLITE_STATIC);
 
@@ -362,7 +549,7 @@ int db_get_text_config(const char *key, char *out, int out_size,
         rc = 0;
     }
 
-    sqlite3_finalize(stmt);
+    sqlite3_reset(stmt);
     return rc;
 }
 
@@ -370,16 +557,15 @@ int db_set_text_config(const char *key, const char *value)
 {
     if (!s_db || !key || !value) return -1;
 
-    const char *sql =
-        "INSERT OR REPLACE INTO game_text_config (key, value) VALUES (?,?);";
-
-    sqlite3_stmt *stmt = NULL;
-    if (sqlite3_prepare_v2(s_db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+    static sqlite3_stmt *st = NULL;
+    sqlite3_stmt *stmt = stmt_prep(&st,
+        "INSERT OR REPLACE INTO game_text_config (key, value) VALUES (?,?);");
+    if (!stmt) return -1;
     sqlite3_bind_text(stmt, 1, key, -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 2, value, -1, SQLITE_STATIC);
 
     int rc = (sqlite3_step(stmt) == SQLITE_DONE) ? 0 : -1;
-    sqlite3_finalize(stmt);
+    sqlite3_reset(stmt);
     return rc;
 }
 
@@ -387,16 +573,14 @@ int db_get_user_by_rfid(const char *tag, user_record_t *out)
 {
     if (!s_db || !tag || tag[0] == '\0' || !out) return -1;
 
-    char sql[512];
-    snprintf(sql, sizeof(sql), "%s WHERE rfid_tag = ?;", k_user_select);
-
-    sqlite3_stmt *stmt = NULL;
-    if (sqlite3_prepare_v2(s_db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+    static sqlite3_stmt *st = NULL;
+    sqlite3_stmt *stmt = stmt_prep(&st, k_sql_user_by_rfid);
+    if (!stmt) return -1;
     sqlite3_bind_text(stmt, 1, tag, -1, SQLITE_STATIC);
 
     int rc = -1;
     if (sqlite3_step(stmt) == SQLITE_ROW) { fill_user(stmt, out); rc = 0; }
-    sqlite3_finalize(stmt);
+    sqlite3_reset(stmt);
     return rc;
 }
 
@@ -404,10 +588,10 @@ int db_set_user_rfid(int user_id, const char *tag)
 {
     if (!s_db) return -1;
 
-    sqlite3_stmt *stmt = NULL;
-    if (sqlite3_prepare_v2(s_db,
-            "UPDATE users SET rfid_tag = ? WHERE id = ?;",
-            -1, &stmt, NULL) != SQLITE_OK) return -1;
+    static sqlite3_stmt *st = NULL;
+    sqlite3_stmt *stmt = stmt_prep(&st,
+            "UPDATE users SET rfid_tag = ? WHERE id = ?;");
+    if (!stmt) return -1;
 
     if (tag && tag[0] != '\0')
         sqlite3_bind_text(stmt, 1, tag, -1, SQLITE_STATIC);
@@ -416,7 +600,7 @@ int db_set_user_rfid(int user_id, const char *tag)
     sqlite3_bind_int(stmt, 2, user_id);
 
     int rc = (sqlite3_step(stmt) == SQLITE_DONE) ? 0 : -1;
-    sqlite3_finalize(stmt);
+    sqlite3_reset(stmt);
     return rc;
 }
 
@@ -426,10 +610,10 @@ int db_get_all_cocktails(cocktail_record_t *buf, int max_count)
 {
     if (!s_db || !buf || max_count <= 0) return 0;
 
-    sqlite3_stmt *stmt = NULL;
-    if (sqlite3_prepare_v2(s_db,
-            "SELECT id, name FROM cocktails ORDER BY name;",
-            -1, &stmt, NULL) != SQLITE_OK) return 0;
+    static sqlite3_stmt *st = NULL;
+    sqlite3_stmt *stmt = stmt_prep(&st,
+            "SELECT id, name FROM cocktails ORDER BY name;");
+    if (!stmt) return 0;
 
     int n = 0;
     while (sqlite3_step(stmt) == SQLITE_ROW && n < max_count) {
@@ -440,7 +624,7 @@ int db_get_all_cocktails(cocktail_record_t *buf, int max_count)
         n++;
     }
 
-    sqlite3_finalize(stmt);
+    sqlite3_reset(stmt);
     return n;
 }
 
@@ -448,15 +632,15 @@ int db_add_cocktail(const char *name)
 {
     if (!s_db || !name || name[0] == '\0') return -1;
 
-    sqlite3_stmt *stmt = NULL;
-    if (sqlite3_prepare_v2(s_db, "INSERT INTO cocktails (name) VALUES (?);",
-                            -1, &stmt, NULL) != SQLITE_OK) return -1;
+    static sqlite3_stmt *st = NULL;
+    sqlite3_stmt *stmt = stmt_prep(&st, "INSERT INTO cocktails (name) VALUES (?);");
+    if (!stmt) return -1;
     sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
 
     int new_id = -1;
     if (sqlite3_step(stmt) == SQLITE_DONE)
         new_id = (int)sqlite3_last_insert_rowid(s_db);
-    sqlite3_finalize(stmt);
+    sqlite3_reset(stmt);
     return new_id;
 }
 
@@ -464,21 +648,22 @@ int db_delete_cocktail(int id)
 {
     if (!s_db) return -1;
 
-    sqlite3_stmt *stmt = NULL;
-
-    /* Delete child pump rows first (foreign_keys pragma is not enabled). */
-    if (sqlite3_prepare_v2(s_db, "DELETE FROM cocktail_pumps WHERE cocktail_id=?;",
-                            -1, &stmt, NULL) != SQLITE_OK) return -1;
+    /* foreign_keys is ON, so the child rows cascade.  The explicit delete is
+     * kept so an older database opened by this build still ends up clean. */
+    static sqlite3_stmt *st_pumps = NULL;
+    sqlite3_stmt *stmt = stmt_prep(&st_pumps,
+            "DELETE FROM cocktail_pumps WHERE cocktail_id=?;");
+    if (!stmt) return -1;
     sqlite3_bind_int(stmt, 1, id);
     sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
-    stmt = NULL;
+    sqlite3_reset(stmt);
 
-    if (sqlite3_prepare_v2(s_db, "DELETE FROM cocktails WHERE id=?;",
-                            -1, &stmt, NULL) != SQLITE_OK) return -1;
+    static sqlite3_stmt *st_ck = NULL;
+    stmt = stmt_prep(&st_ck, "DELETE FROM cocktails WHERE id=?;");
+    if (!stmt) return -1;
     sqlite3_bind_int(stmt, 1, id);
     int rc = (sqlite3_step(stmt) == SQLITE_DONE) ? 0 : -1;
-    sqlite3_finalize(stmt);
+    sqlite3_reset(stmt);
     return rc;
 }
 
@@ -486,11 +671,11 @@ int db_get_cocktail_pumps(int cocktail_id, cocktail_pump_t *buf, int max_count)
 {
     if (!s_db || !buf || max_count <= 0) return 0;
 
-    sqlite3_stmt *stmt = NULL;
-    if (sqlite3_prepare_v2(s_db,
+    static sqlite3_stmt *st = NULL;
+    sqlite3_stmt *stmt = stmt_prep(&st,
             "SELECT pump_index, mode, value FROM cocktail_pumps"
-            " WHERE cocktail_id=? ORDER BY pump_index;",
-            -1, &stmt, NULL) != SQLITE_OK) return 0;
+            " WHERE cocktail_id=? ORDER BY pump_index;");
+    if (!stmt) return 0;
     sqlite3_bind_int(stmt, 1, cocktail_id);
 
     int n = 0;
@@ -501,7 +686,7 @@ int db_get_cocktail_pumps(int cocktail_id, cocktail_pump_t *buf, int max_count)
         n++;
     }
 
-    sqlite3_finalize(stmt);
+    sqlite3_reset(stmt);
     return n;
 }
 
@@ -509,27 +694,32 @@ int db_set_cocktail_pumps(int cocktail_id, const cocktail_pump_t *pumps, int cou
 {
     if (!s_db || (count > 0 && !pumps)) return -1;
 
-    sqlite3_stmt *stmt = NULL;
-    if (sqlite3_prepare_v2(s_db, "DELETE FROM cocktail_pumps WHERE cocktail_id=?;",
-                            -1, &stmt, NULL) != SQLITE_OK) return -1;
+    /* Replacing a recipe must not leave it half-written if one row fails. */
+    exec_sql("BEGIN IMMEDIATE;");
+
+    static sqlite3_stmt *st_del = NULL;
+    sqlite3_stmt *stmt = stmt_prep(&st_del,
+            "DELETE FROM cocktail_pumps WHERE cocktail_id=?;");
+    if (!stmt) { exec_sql("ROLLBACK;"); return -1; }
     sqlite3_bind_int(stmt, 1, cocktail_id);
     sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
+    sqlite3_reset(stmt);
 
+    static sqlite3_stmt *st_ins = NULL;
     for (int i = 0; i < count; i++) {
-        stmt = NULL;
-        if (sqlite3_prepare_v2(s_db,
+        stmt = stmt_prep(&st_ins,
                 "INSERT INTO cocktail_pumps (cocktail_id, pump_index, mode, value)"
-                " VALUES (?,?,?,?);",
-                -1, &stmt, NULL) != SQLITE_OK) return -1;
+                " VALUES (?,?,?,?);");
+        if (!stmt) { exec_sql("ROLLBACK;"); return -1; }
         sqlite3_bind_int(stmt, 1, cocktail_id);
         sqlite3_bind_int(stmt, 2, pumps[i].pump_index);
         sqlite3_bind_int(stmt, 3, pumps[i].mode);
         sqlite3_bind_int(stmt, 4, pumps[i].value);
         int rc = (sqlite3_step(stmt) == SQLITE_DONE) ? 0 : -1;
-        sqlite3_finalize(stmt);
-        if (rc != 0) return -1;
+        sqlite3_reset(stmt);
+        if (rc != 0) { exec_sql("ROLLBACK;"); return -1; }
     }
 
+    exec_sql("COMMIT;");
     return 0;
 }

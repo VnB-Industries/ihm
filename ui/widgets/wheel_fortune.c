@@ -24,6 +24,7 @@ typedef struct {
 
 static void wf_redraw(wf_priv_t *p);
 static void wf_touch_event_cb(lv_event_t *e);
+static void wf_delete_event_cb(lv_event_t *e);
 
 #define WF_SWIPE_TRIGGER_PX  12
 
@@ -87,7 +88,8 @@ static void wf_redraw(wf_priv_t *p)
     for (uint8_t i = 0; i < p->seg_count; i++) {
         int32_t start = (int32_t)i * seg_angle + p->rotation;
         int32_t end   = start + seg_angle;
-        wf_draw_segment(&layer, cx, cy, r, start, end, p->segs[i].color);
+        wf_draw_segment(&layer, cx, cy, r, start, end,
+                        lv_color_hex(p->segs[i].color_rgb));
     }
 
     /* --- divider lines --- */
@@ -227,6 +229,24 @@ static void wf_touch_event_cb(lv_event_t *e)
     p->spin_request_cb(wf, (uint16_t)(LV_ABS(vect.x) + LV_ABS(vect.y)));
 }
 
+/* Release everything wheel_fortune_create() allocated by hand.  Without this
+ * the private block and the RGB565 canvas buffer leak for every wheel ever
+ * destroyed; today's screens are permanent, which is exactly why the leak
+ * would go unnoticed until one is not. */
+static void wf_delete_event_cb(lv_event_t *e)
+{
+    lv_obj_t *cont = lv_event_get_target(e);
+    wf_priv_t *p = (wf_priv_t *)lv_obj_get_user_data(cont);
+    if (!p) return;
+
+    /* Drop the canvas' reference before freeing the buffer it points at. */
+    if (p->canvas) lv_canvas_set_draw_buf(p->canvas, NULL);
+    if (p->draw_buf) lv_draw_buf_destroy(p->draw_buf);
+
+    lv_obj_set_user_data(cont, NULL);
+    lv_free(p);
+}
+
 /* ── public API ─────────────────────────────────────────────────────────── */
 
 lv_obj_t *wheel_fortune_create(lv_obj_t *parent, lv_coord_t radius)
@@ -241,6 +261,9 @@ lv_obj_t *wheel_fortune_create(lv_obj_t *parent, lv_coord_t radius)
     lv_obj_set_style_pad_all(cont, 0, LV_PART_MAIN);
     lv_obj_clear_flag(cont, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(cont, wf_touch_event_cb, LV_EVENT_RELEASED, NULL);
+    /* The private block and the canvas buffer are ours, not LVGL's, so they
+     * have to be released when the object goes away. */
+    lv_obj_add_event_cb(cont, wf_delete_event_cb, LV_EVENT_DELETE, NULL);
 
     /* Pointer triangle at the top center */
     lv_obj_t *ptr = lv_label_create(cont);

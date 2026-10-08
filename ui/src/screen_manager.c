@@ -20,6 +20,7 @@
 typedef struct {
     lv_obj_t *(*get_fn)(void);
     void      (*enter_fn)(void);   /* called every time the screen is shown */
+    void      (*leave_fn)(void);   /* called when the screen is replaced     */
 } screen_entry_t;
 
 static const screen_entry_t k_screens[SCREEN_COUNT] = {
@@ -31,7 +32,7 @@ static const screen_entry_t k_screens[SCREEN_COUNT] = {
     [SCREEN_BONUS_WHEEL]    = { scr_bonus_wheel_get,    scr_bonus_wheel_refresh    },
     [SCREEN_GIVE_MODIFIER]  = { scr_give_modifier_get,  scr_give_modifier_refresh  },
     [SCREEN_LEADERBOARD]    = { scr_leaderboard_get,    scr_leaderboard_refresh    },
-    [SCREEN_PARAMETERS]     = { scr_parameters_get,     scr_parameters_refresh     },
+    [SCREEN_PARAMETERS]     = { scr_parameters_get,     scr_parameters_refresh,    scr_parameters_leave },
     [SCREEN_SAVING]         = { scr_saving_get,         scr_saving_refresh         },
 };
 
@@ -87,6 +88,14 @@ static void inactivity_timer_cb(lv_timer_t *t)
         return;
     }
 
+    /* A calibration ends when the glass is lifted, which routinely takes
+     * longer than the inactivity window.  Blanking to the screensaver while a
+     * pump is energised would hide the only controls that can stop it. */
+    if(serial_comm_job_active()) {
+        inactivity_reset();
+        return;
+    }
+
     uint32_t now = lv_tick_get();
     uint32_t elapsed = now - s_last_touch_ms;
     if(elapsed >= IHM_INACTIVITY_TIMEOUT_MS) {
@@ -94,9 +103,14 @@ static void inactivity_timer_cb(lv_timer_t *t)
     }
 }
 
-static void rfid_tick(lv_timer_t *t)
+/* Single owner of the serial link's read side.  Everything the controller
+ * sends is parsed once here, inside serial_comm_poll(), and routed to the
+ * active job or the RFID queue; no other module reads the fd. */
+static void serial_tick(lv_timer_t *t)
 {
     (void)t;
+
+    serial_comm_poll();
 
     if (!s_rfid_poll_enabled) {
         return;
@@ -169,12 +183,25 @@ void screen_manager_init(void)
     register_input_activity_hooks();
     s_inactivity_timer = lv_timer_create(inactivity_timer_cb,
                                          IHM_INACTIVITY_POLL_MS, NULL);
-    s_rfid_timer = lv_timer_create(rfid_tick, 150, NULL);
+    /* 50 ms: fast enough that a job's PROGRESS and completion are picked up
+     * promptly, which is what keeps the pour UI responsive. */
+    s_rfid_timer = lv_timer_create(serial_tick, 50, NULL);
+}
+
+void screen_manager_service_serial(void)
+{
+    serial_comm_poll();
 }
 
 void screen_manager_load(screen_id_t id)
 {
     if (id >= SCREEN_COUNT) return;
+
+    /* Let the outgoing screen release whatever it owns before the incoming one
+     * runs.  Skipped when reloading the same screen. */
+    if (s_current != SCREEN_COUNT && s_current != id && k_screens[s_current].leave_fn) {
+        k_screens[s_current].leave_fn();
+    }
 
     /* Call refresh/enter hook before loading */
     if (k_screens[id].enter_fn)

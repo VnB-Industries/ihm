@@ -26,7 +26,12 @@ typedef struct {
     int     total_cl;          /* cumulative cL drank                       */
     int     given_modifier;    /* +1 = gave bonus, -1 = gave malus, 0 = none */
     int     given_to_id;       /* user-id of recipient, -1 = none           */
-    int64_t last_spin_epoch;   /* Unix timestamp of last basic spin         */
+    int64_t last_spin_epoch;   /* Unix timestamp of the last basic spin     */
+    int64_t spin_blocked_until;/* Unix timestamp before which spinning is
+                                * refused.  Set by TIMEOUT_ADD/REMOVE and by
+                                * the per-spin cooldown.  Never means "when
+                                * the user last spun" - that is
+                                * last_spin_epoch.                          */
     char    rfid_tag[32];      /* linked RFID UID hex string, or "" if none */
 } user_record_t;
 
@@ -51,7 +56,10 @@ int  db_get_user(int id, user_record_t *out);
  *  Returns the new row id, or -1 on error. */
 int  db_add_user(const char *name);
 
-/** Persist all fields of @p u back to the DB.  Returns 0 on success. */
+/** Persist every writable field of @p u back to the DB, @c name and
+ *  @c rfid_tag included.  Returns 0 on success.
+ *  An empty @c rfid_tag is stored as SQL NULL so the uniqueness of a linked
+ *  tag is not broken by many users sharing "". */
 int  db_update_user(const user_record_t *u);
 
 /** Delete a user by id.  Returns 0 on success. */
@@ -79,8 +87,16 @@ int  db_add_cl_history(int user_id, int64_t epoch, int total_cl);
  *  Returns number of rows written. */
 int  db_get_cl_history(int user_id, cl_history_point_t *buf, int max_count);
 
+/** Drop all but the newest @p keep history points of @p user_id.
+ *  @p keep <= 0 prunes nothing.  Returns 0 on success, -1 on error.
+ *  db_add_cl_history() calls this itself, so callers rarely need it. */
+int  db_prune_cl_history(int user_id, int keep);
+
 /* ── config key-value ──────────────────────────────────────────────────── */
 
+/* Integer config reads are served from an in-memory cache, so calling
+ * db_get_config() per frame is cheap.  db_set_config() keeps the cache
+ * coherent; nothing else may write game_config behind our back. */
 int  db_get_config(const char *key, int default_val);
 int  db_set_config(const char *key, int value);
 

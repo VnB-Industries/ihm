@@ -8,7 +8,21 @@ extern "C" {
 #include <stdbool.h>
 #include <stdint.h>
 #include "game_db.h"
-#include "wheel_fortune.h"
+
+/* This header and game_logic.c deliberately do not include lvgl.h.  The game
+ * rules are the part worth testing on a host without a display, so they speak
+ * in plain structs and own their own RNG.  Screens adapt game_segment_t to
+ * whatever the wheel widget wants. */
+
+#define GAME_MAX_SEGMENTS 12
+
+/* One wheel slice, display-toolkit agnostic. */
+typedef struct {
+    const char *label;      /* short text drawn on the slice              */
+    const char *image_src;  /* optional image path, NULL for none         */
+    uint32_t    color_rgb;  /* 0xRRGGBB                                   */
+    uint32_t    value;      /* cL for the main wheel, a token for the bonus */
+} game_segment_t;
 
 /* ── modifier types ─────────────────────────────────────────────────────── */
 
@@ -27,6 +41,18 @@ typedef enum {
 #define BONUS_WHEEL_VAL_TIMEOUT_ADD     3u
 #define BONUS_WHEEL_VAL_TIMEOUT_REMOVE  4u
 
+/* ── random numbers ─────────────────────────────────────────────────────── */
+
+/** Seed the game RNG.  Must be called once at startup with something that
+ *  changes between boots, otherwise every power-up replays the same spins.
+ *  A @p seed of 0 is replaced with a non-zero constant. */
+void game_rng_seed(uint32_t seed);
+
+/** Uniform random integer in [@p min, @p max] inclusive.
+ *  Rejection-sampled, so unlike a plain modulo it does not favour low values
+ *  when the span does not divide 2^32. */
+uint32_t game_rand(uint32_t min, uint32_t max);
+
 /* ── wheel segment builders ─────────────────────────────────────────────── */
 
 /**
@@ -35,29 +61,46 @@ typedef enum {
  * Writes up to 4 segments into @p segs and sets *count.
  */
 void game_compute_wheel_segments(const user_record_t *u,
-                                 wf_segment_t *segs, uint8_t *count);
+                                 game_segment_t *segs, uint8_t *count);
 
 /**
- * Build bonus-wheel segments (BONUS / RIEN / MALUS) from game_config weights.
- * Writes segments into @p segs and sets *count.
+ * Build bonus-wheel segments (BONUS / RIEN / MALUS / ±Temps) from
+ * game_config weights.  Writes segments into @p segs and sets *count.
  */
-void game_compute_bonus_segments(wf_segment_t *segs, uint8_t *count);
+void game_compute_bonus_segments(game_segment_t *segs, uint8_t *count);
+
+/* ── spin cooldown ──────────────────────────────────────────────────────── */
+
+/** Seconds @p u must still wait before spinning again; <= 0 means "now".
+ *  Reads spin_blocked_until only, so a pending ±Temps modifier and the
+ *  per-spin cooldown are both honoured by the same check. */
+int64_t game_spin_remaining_seconds(const user_record_t *u);
 
 /* ── spin result handlers ───────────────────────────────────────────────── */
 
 /**
- * Called after basic wheel spin completes.
- * Records @p cl_value to user stats, rolls for bonus-wheel trigger.
- * @return true if bonus wheel should appear for this user.
+ * Record that @p user_id has just spun the main wheel: stamps
+ * last_spin_epoch and arms the configured per-spin cooldown.
+ * Call when the wheel stops, before the pour is requested.
  */
-bool game_on_basic_spin(int user_id, int cl_value);
+void game_on_spin_started(int user_id);
+
+/**
+ * Credit a finished pour to @p user_id.
+ * @p measured_cl is what the controller reported actually dispensed, which is
+ * what the leaderboard must count: a pour cut short by the glass being lifted
+ * delivers less than the wheel promised.
+ * Also rolls for a bonus-wheel trigger.
+ * @return true if the bonus wheel should appear for this user.
+ */
+bool game_on_dispense_complete(int user_id, int measured_cl);
 
 /**
  * Called after bonus wheel spin completes.
  * Decrements wheel_trigger, returns the modifier obtained.
  */
 modifier_type_t game_on_bonus_spin(int user_id, uint16_t seg_index,
-                                    const wf_segment_t *segs, uint8_t seg_count);
+                                    const game_segment_t *segs, uint8_t seg_count);
 
 /**
  * Apply a modifier: records on giver, increments bonus/malus on target.

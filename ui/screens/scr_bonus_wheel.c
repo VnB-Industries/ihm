@@ -5,10 +5,7 @@
 #include "game_db.h"
 #include <stdio.h>
 #include <string.h>
-#if LV_USE_LOTTIE
-#include <libgen.h>
-#include <unistd.h>
-#endif
+#include "assets.h"
 
 static lv_obj_t    *s_screen;
 static lv_obj_t    *s_wheel;
@@ -22,8 +19,25 @@ static uint32_t     s_confetti_buf[700 * 700];
 static lv_timer_t  *s_confetti_timer = NULL;
 #endif
 
-static wf_segment_t s_segments[WHEEL_FORTUNE_MAX_SEGMENTS];
-static uint8_t      s_seg_count = 0;
+static game_segment_t s_segments[GAME_MAX_SEGMENTS];
+static uint8_t        s_seg_count = 0;
+
+/* Hand the rules layer's slices to the widget.  game_logic deliberately knows
+ * nothing about LVGL, so the two representations are bridged here. */
+static void push_segments_to_wheel(void)
+{
+    wf_segment_t wf_segs[WHEEL_FORTUNE_MAX_SEGMENTS];
+    uint8_t n = s_seg_count;
+    if (n > WHEEL_FORTUNE_MAX_SEGMENTS) n = WHEEL_FORTUNE_MAX_SEGMENTS;
+
+    for (uint8_t i = 0; i < n; i++) {
+        wf_segs[i].label     = s_segments[i].label;
+        wf_segs[i].image_src = s_segments[i].image_src;
+        wf_segs[i].color_rgb = s_segments[i].color_rgb;
+        wf_segs[i].value     = s_segments[i].value;
+    }
+    wheel_fortune_set_segments(s_wheel, wf_segs, n);
+}
 
 /* ── helpers ────────────────────────────────────────────────────────────── */
 
@@ -34,29 +48,10 @@ static void set_spin_enabled(bool en)
 }
 
 #if LV_USE_LOTTIE
-static const char *resolve_confetti_path(void)
-{
-    static char resolved[512];
-    char exe[512];
-    ssize_t len = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
-    if (len > 0) {
-        exe[len] = '\0';
-        char *dir = dirname(exe);
-        snprintf(resolved, sizeof(resolved), "%s/images/Confetti.json", dir);
-        FILE *f = fopen(resolved, "rb");
-        if (f) { fclose(f); return resolved; }
-    }
-    static const char *candidates[] = { "images/Confetti.json", "../images/Confetti.json" };
-    for (uint32_t i = 0; i < (uint32_t)(sizeof(candidates)/sizeof(candidates[0])); i++) {
-        FILE *f = fopen(candidates[i], "rb");
-        if (f) { fclose(f); return candidates[i]; }
-    }
-    return NULL;
-}
 
 static void confetti_preload(lv_obj_t *screen)
 {
-    const char *src = resolve_confetti_path();
+    const char *src = asset_path("images/Confetti.json");
     if (src == NULL || s_confetti != NULL) return;
     s_confetti = lv_lottie_create(screen);
     lv_lottie_set_buffer(s_confetti, 700, 700, s_confetti_buf);
@@ -166,7 +161,7 @@ static void on_spin_clicked(lv_event_t *e)
     lv_obj_add_flag(s_continue_btn, LV_OBJ_FLAG_HIDDEN);
     set_spin_enabled(false);
 
-    uint16_t result = (uint16_t)(lv_rand(0, 0xFFFF) % s_seg_count);
+    uint16_t result = (uint16_t)game_rand(0, (uint32_t)s_seg_count - 1u);
     wheel_fortune_spin(s_wheel, 3000, result);
 }
 
@@ -175,7 +170,7 @@ static void on_wheel_swipe_spin(lv_obj_t *wf, uint16_t swipe_strength)
     if (lv_obj_has_state(s_spin_btn, LV_STATE_DISABLED)) return;
     if (wheel_fortune_is_spinning(s_wheel) || s_seg_count == 0) return;
 
-    uint16_t result = (uint16_t)(lv_rand(0, 0xFFFF) % s_seg_count);
+    uint16_t result = (uint16_t)game_rand(0, (uint32_t)s_seg_count - 1u);
     uint32_t clamped_strength = LV_MIN((uint32_t)swipe_strength, 144U);
     uint16_t full_turns = (uint16_t)(2U + clamped_strength / 16U);
     uint32_t duration_ms = 3800U + clamped_strength * 12U;
@@ -276,7 +271,7 @@ void scr_bonus_wheel_refresh(void)
 
     /* Rebuild segments from current config */
     game_compute_bonus_segments(s_segments, &s_seg_count);
-    wheel_fortune_set_segments(s_wheel, s_segments, s_seg_count);
+    push_segments_to_wheel();
 
     lv_label_set_text(s_result_label, "Appuyez sur Tourner !");
     lv_obj_set_style_text_color(s_result_label, lv_color_hex(0xEAEAEA), LV_PART_MAIN);

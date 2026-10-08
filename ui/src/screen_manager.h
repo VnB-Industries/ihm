@@ -38,6 +38,11 @@ void         screen_manager_init(void);
 void         screen_manager_load(screen_id_t id);
 screen_id_t  screen_manager_current(void);
 
+/* Pump the serial link and the inactivity clock.  Called from an internal
+ * timer; exposed only so a modal flow can keep the link moving while it owns
+ * the UI. */
+void         screen_manager_service_serial(void);
+
 /* ── RFID enrollment ─────────────────────────────────────────────── */
 
 typedef enum {

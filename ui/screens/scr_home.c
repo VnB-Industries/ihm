@@ -3,10 +3,7 @@
 #include "game_db.h"
 #include <stdio.h>
 #include <string.h>
-#if LV_USE_GIF
-#include <libgen.h>
-#include <unistd.h>
-#endif
+#include "assets.h"
 
 static lv_obj_t *s_screen;
 static lv_obj_t *s_title_label;
@@ -33,77 +30,6 @@ static const char *k_banner_default =
 
 /* ── helpers ────────────────────────────────────────────────────────────── */
 
-#if LV_USE_GIF
-static const char *resolve_ricassou_path(void)
-{
-    static char resolved[512];
-    char exe[512];
-    ssize_t len = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
-    if (len > 0) {
-        exe[len] = '\0';
-        char *dir = dirname(exe);
-        char local_path[512];
-        lv_snprintf(local_path, sizeof(local_path), "%s/images/ricassouLeft.gif", dir);
-        FILE *f = fopen(local_path, "rb");
-        if (f) {
-            fclose(f);
-            lv_snprintf(resolved, sizeof(resolved), "A:%s", local_path);
-            return resolved;
-        }
-    }
-
-    static const char *candidates[] = {
-        "images/ricassouLeft.gif",
-        "../images/ricassouLeft.gif",
-    };
-
-    for (uint32_t i = 0; i < (uint32_t)(sizeof(candidates) / sizeof(candidates[0])); i++) {
-        FILE *f = fopen(candidates[i], "rb");
-        if (f) {
-            fclose(f);
-            lv_snprintf(resolved, sizeof(resolved), "A:%s", candidates[i]);
-            return resolved;
-        }
-    }
-
-    return NULL;
-}
-
-static const char *resolve_ricassou_right_path(void)
-{
-    static char resolved[512];
-    char exe[512];
-    ssize_t len = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
-    if (len > 0) {
-        exe[len] = '\0';
-        char *dir = dirname(exe);
-        char local_path[512];
-        lv_snprintf(local_path, sizeof(local_path), "%s/images/ricassouRight.gif", dir);
-        FILE *f = fopen(local_path, "rb");
-        if (f) {
-            fclose(f);
-            lv_snprintf(resolved, sizeof(resolved), "A:%s", local_path);
-            return resolved;
-        }
-    }
-
-    static const char *candidates[] = {
-        "images/ricassouRight.gif",
-        "../images/ricassouRight.gif",
-    };
-
-    for (uint32_t i = 0; i < (uint32_t)(sizeof(candidates) / sizeof(candidates[0])); i++) {
-        FILE *f = fopen(candidates[i], "rb");
-        if (f) {
-            fclose(f);
-            lv_snprintf(resolved, sizeof(resolved), "A:%s", candidates[i]);
-            return resolved;
-        }
-    }
-
-    return NULL;
-}
-#endif
 
 static lv_obj_t *make_main_btn(lv_obj_t *parent, const char *text,
                                 lv_color_t color, lv_event_cb_t cb)
@@ -249,7 +175,7 @@ static void banner_start_after_render_cb(lv_timer_t *t)
         if (s_side_img_right) lv_obj_add_flag(s_side_img_right, LV_OBJ_FLAG_HIDDEN);
 
         if (s_ricassou_gif) {
-            const char *gif_src = resolve_ricassou_path();
+            const char *gif_src = asset_lv_path("images/ricassouLeft.gif");
             if (gif_src) {
                 lv_gif_set_src(s_ricassou_gif, gif_src);
                 lv_obj_align(s_ricassou_gif, LV_ALIGN_LEFT_MID, -40, 20);
@@ -261,7 +187,7 @@ static void banner_start_after_render_cb(lv_timer_t *t)
         }
 
         if (s_ricassou_right_gif) {
-            const char *gif_src = resolve_ricassou_right_path();
+            const char *gif_src = asset_lv_path("images/ricassouRight.gif");
             if (gif_src) {
                 lv_gif_set_src(s_ricassou_right_gif, gif_src);
                 lv_obj_align(s_ricassou_right_gif, LV_ALIGN_RIGHT_MID, 40, 20);

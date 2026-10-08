@@ -23,7 +23,7 @@ set(IHM_FBDEV_DEVICE "/dev/fb0" CACHE STRING "Framebuffer device path")
 set(IHM_EVDEV_DEVICE "/dev/input/event0" CACHE STRING "Input event device path")
 set(IHM_DRM_DEVICE "/dev/dri/card0" CACHE STRING "DRM card device path")
 set(IHM_SERIAL_DEVICE "/dev/ttyACM*" CACHE STRING "USB serial device path or glob pattern to microcontroller")
-set(IHM_SERIAL_BAUD 9600 CACHE STRING "USB serial baud rate")
+set(IHM_SERIAL_BAUD 115200 CACHE STRING "USB serial baud rate")
 set(IHM_SCREEN_WIDTH 1024 CACHE STRING "Logical UI width")
 set(IHM_SCREEN_HEIGHT 600 CACHE STRING "Logical UI height")
 
@@ -62,8 +62,17 @@ if(CMAKE_TOOLCHAIN_FILE)
     get_filename_component(IHM_TOOLCHAIN_FILE_ABS "${CMAKE_TOOLCHAIN_FILE}" ABSOLUTE)
 endif()
 
+# One cache per toolchain. A single shared directory meant a native build and
+# a Pi cross build overwrote each other's liblvgl.a, and the loser failed to
+# link with "Relocations in generic ELF (EM: 183)" / "file in wrong format".
+if(CMAKE_TOOLCHAIN_FILE)
+    get_filename_component(IHM_THIRD_PARTY_TAG "${CMAKE_TOOLCHAIN_FILE}" NAME_WE)
+else()
+    set(IHM_THIRD_PARTY_TAG "native-${CMAKE_SYSTEM_PROCESSOR}")
+endif()
+
 set(IHM_THIRD_PARTY_BUILD_ROOT
-    "${CMAKE_CURRENT_LIST_DIR}/.third_party_build"
+    "${CMAKE_CURRENT_LIST_DIR}/.third_party_build/${IHM_THIRD_PARTY_TAG}"
     CACHE PATH "Directory used to cache third-party builds outside the main build tree")
 set(IHM_LVGL_BUILD_DIR "${IHM_THIRD_PARTY_BUILD_ROOT}/lvgl")
 set(IHM_LVGL_LIB_PATH "${IHM_LVGL_BUILD_DIR}/liblvgl.a")
@@ -125,7 +134,7 @@ set_target_properties(lvgl_thorvg PROPERTIES
 
 # Explicit cleanup for cached third-party outputs. Normal `make clean` leaves this cache intact.
 add_custom_target(clean-third-party
-    COMMAND ${CMAKE_COMMAND} -E remove_directory ${IHM_THIRD_PARTY_BUILD_ROOT}
+    COMMAND ${CMAKE_COMMAND} -E remove_directory ${CMAKE_CURRENT_LIST_DIR}/.third_party_build
     COMMENT "Cleaning cached third-party build artifacts"
 )
 
@@ -208,4 +217,25 @@ set_target_properties(${PROJECT_NAME} PROPERTIES
 install(TARGETS ${PROJECT_NAME}
     RUNTIME DESTINATION bin
 )
+
+# ── Host tests ──────────────────────────────────────────────────────────────
+# game_logic.c and game_db.c do not depend on LVGL or on a display, so the
+# game rules can be tested on the build host. Off by default so the normal
+# build is unchanged: configure with -DIHM_BUILD_TESTS=ON, then `ctest`.
+option(IHM_BUILD_TESTS "Build the host-side rules tests" OFF)
+
+if(IHM_BUILD_TESTS)
+    enable_testing()
+
+    add_executable(test_game_logic
+        tests/test_game_logic.c
+        components/game_logic.c
+        components/game_db.c
+    )
+    target_include_directories(test_game_logic PRIVATE components src)
+    target_link_libraries(test_game_logic PRIVATE PkgConfig::SQLITE3)
+    target_compile_options(test_game_logic PRIVATE -Wall -Wextra)
+
+    add_test(NAME game_logic COMMAND test_game_logic)
+endif()
 

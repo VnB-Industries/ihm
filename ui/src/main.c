@@ -2,18 +2,45 @@
 #define _DEFAULT_SOURCE
 #endif
 
+#include <signal.h>
 #include <stdint.h>
-#include <unistd.h>
 #include <stdio.h>
+#include <time.h>
+#include <unistd.h>
 #include "lvgl/lvgl.h"
 #include "screen_manager.h"
 #include "game_db.h"
+#include "game_logic.h"
 #include "platform_linux.h"
 #include "serial_comm.h"
 
 #ifndef IHM_DB_PATH
 #define IHM_DB_PATH "./game.db"
 #endif
+
+/* Set from a signal handler, so nothing but an assignment happens in there. */
+static volatile sig_atomic_t s_shutdown_requested = 0;
+
+static void on_terminate_signal(int sig)
+{
+    (void)sig;
+    s_shutdown_requested = 1;
+}
+
+/* systemd sends SIGTERM on `systemctl stop`.  Without this the process is
+ * killed outright: pumps keep running until the controller's own timeout and
+ * SQLite is cut off mid-write. */
+static void install_signal_handlers(void)
+{
+    struct sigaction sa;
+    sa.sa_handler = on_terminate_signal;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;              /* no SA_RESTART: let the loop notice at once */
+
+    sigaction(SIGTERM, &sa, NULL);
+    sigaction(SIGINT,  &sa, NULL);
+    sigaction(SIGHUP,  &sa, NULL);
+}
 
 static void sync_flow_constants_from_db(void)
 {
@@ -48,7 +75,14 @@ static void sync_flow_constants_from_db(void)
 
 int main(void)
 {
+    install_signal_handlers();
+
     lv_init();
+
+    /* lv_init() seeds LVGL's RNG with a fixed constant, so every boot would
+     * otherwise replay the exact same wheel results.  game_logic owns the
+     * randomness the game depends on; seed it from the clock. */
+    game_rng_seed((uint32_t)time(NULL) ^ (uint32_t)getpid());
 
     if(!platform_linux_init()) {
         return 1;
@@ -68,7 +102,7 @@ int main(void)
     screen_manager_init();
     screen_manager_load(SCREEN_HOME);
 
-    while(1) {
+    while(!s_shutdown_requested) {
         uint32_t sleep_time_ms = lv_timer_handler();
         if(sleep_time_ms == LV_NO_TIMER_READY) {
             sleep_time_ms = LV_DEF_REFR_PERIOD;
@@ -76,7 +110,11 @@ int main(void)
         usleep(sleep_time_ms * 1000U);
     }
 
-    db_close();
+    fprintf(stderr, "[main] shutting down\n");
+
+    /* Order matters: stop the pumps before letting go of the serial link. */
+    serial_comm_send_stop();
     serial_comm_deinit();
+    db_close();
     return 0;
 }

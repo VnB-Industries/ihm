@@ -1,7 +1,9 @@
 #include "game_logic.h"
 #include "game_db.h"
-#include "lvgl/lvgl.h"
+#include <stdio.h>
 #include <time.h>
+
+/* No lvgl.h here on purpose - see the note in game_logic.h. */
 
 /* ── session state ──────────────────────────────────────────────────────── */
 
@@ -25,33 +27,72 @@ void            game_set_selected_glass_cl(int glass_cl)
     s_selected_glass_cl = glass_cl;
 }
 
+/* ── random numbers ─────────────────────────────────────────────────────── */
+
+/* xorshift32.  Seeded explicitly from main() so spins differ between boots;
+ * a zero state would stick at zero forever, hence the guard in the seeder. */
+static uint32_t s_rng_state = 0x1234ABCDu;
+
+void game_rng_seed(uint32_t seed)
+{
+    s_rng_state = (seed != 0u) ? seed : 0x1234ABCDu;
+}
+
+static uint32_t rng_next(void)
+{
+    uint32_t x = s_rng_state;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    s_rng_state = x;
+    return x;
+}
+
+uint32_t game_rand(uint32_t min, uint32_t max)
+{
+    if (max <= min) return min;
+
+    uint64_t span = (uint64_t)max - (uint64_t)min + 1u;
+
+    /* Reject the tail that does not divide evenly into 2^32, so each value in
+     * the range is equally likely.  When span is a power of two the remainder
+     * is 0, limit becomes 2^32 and nothing is ever rejected. */
+    uint64_t limit = (UINT64_C(1) << 32) - ((UINT64_C(1) << 32) % span);
+
+    uint32_t r;
+    do {
+        r = rng_next();
+    } while ((uint64_t)r >= limit);
+
+    return (uint32_t)(min + (r % span));
+}
+
 /* ── basic wheel ────────────────────────────────────────────────────────── */
 
-static const lv_color_t k_seg_colors[4] = {
-    { .blue = 0x3C, .green = 0x4C, .red = 0xE7 }, /* blue-violet */
-    { .blue = 0x71, .green = 0xCC, .red = 0x2E }, /* green       */
-    { .blue = 0x12, .green = 0x9C, .red = 0xF3 }, /* orange      */
-    { .blue = 0xB6, .green = 0x59, .red = 0x9B }, /* purple      */
+static const uint32_t k_seg_colors[4] = {
+    0xE74C3Cu, /* red    */
+    0x2ECC71u, /* green  */
+    0xF39C12u, /* orange */
+    0x9B59B6u, /* purple */
 };
 
 static const int k_base_cl[4] = { 0, 2, 4, 6 };
 
 /* Persistent label buffers – pointers remain valid for the app lifetime */
-static char s_seg_labels[4][8];
+static char s_seg_labels[4][16];
 
 void game_compute_wheel_segments(const user_record_t *u,
-                                 wf_segment_t *segs, uint8_t *count)
+                                 game_segment_t *segs, uint8_t *count)
 {
     int shift = (u->malus - u->bonus) * 2; /* net cL shift */
 
     for (int i = 0; i < 4; i++) {
         int val = k_base_cl[i] + shift;
         if (val < 0) val = 0;
-        lv_snprintf(s_seg_labels[i], sizeof(s_seg_labels[i]),
-                    "%dcL", val);
+        snprintf(s_seg_labels[i], sizeof(s_seg_labels[i]), "%dcL", val);
         segs[i].label = s_seg_labels[i];
         segs[i].image_src = NULL;
-        segs[i].color = k_seg_colors[i];
+        segs[i].color_rgb = k_seg_colors[i];
         segs[i].value = (uint32_t)val;
     }
     *count = 4;
@@ -59,17 +100,33 @@ void game_compute_wheel_segments(const user_record_t *u,
 
 /* ── bonus wheel ────────────────────────────────────────────────────────── */
 
-static const char *k_bonus_icon_bonus          = LV_SYMBOL_OK;
-static const char *k_bonus_icon_nothing        = LV_SYMBOL_CLOSE;
-static const char *k_bonus_icon_malus          = LV_SYMBOL_WARNING;
-static const char *k_bonus_icon_timeout_add    = LV_SYMBOL_PAUSE;
-static const char *k_bonus_icon_timeout_remove = LV_SYMBOL_PLAY;
+/* Labels are the fallback the wheel draws when a slice has no image, or when
+ * its image fails to decode, so they are plain words rather than icon glyphs. */
+static const char *k_bonus_text_bonus          = "Bonus";
+static const char *k_bonus_text_nothing        = "Rien";
+static const char *k_bonus_text_malus          = "Malus";
+static const char *k_bonus_text_timeout_add    = "+Temps";
+static const char *k_bonus_text_timeout_remove = "-Temps";
 static const char *k_bonus_img_bonus           = "A:images/verreBonus.png";
 static const char *k_bonus_img_malus           = "A:images/verreMalus.png";
 static const char *k_bonus_img_timeout_add     = "A:images/timeMalus.png";
 static const char *k_bonus_img_timeout_remove  = "A:images/timeBonus.png";
 
-void game_compute_bonus_segments(wf_segment_t *segs, uint8_t *count)
+/* Append @p weight identical slices, stopping at the segment ceiling. */
+static void push_bonus_slices(game_segment_t *segs, uint8_t *n, int weight,
+                              const char *label, const char *image,
+                              uint32_t color_rgb, uint32_t value)
+{
+    for (int i = 0; i < weight && *n < GAME_MAX_SEGMENTS; i++) {
+        segs[*n].label     = label;
+        segs[*n].image_src = image;
+        segs[*n].color_rgb = color_rgb;
+        segs[*n].value     = value;
+        (*n)++;
+    }
+}
+
+void game_compute_bonus_segments(game_segment_t *segs, uint8_t *count)
 {
     int wb  = db_get_config("bonus_wheel_bonus_weight",          1);
     int wn  = db_get_config("bonus_wheel_nothing_weight",        2);
@@ -84,71 +141,84 @@ void game_compute_bonus_segments(wf_segment_t *segs, uint8_t *count)
     if (wtr < 0) wtr = 0;
 
     uint8_t n = 0;
-    for (int i = 0; i < wb && n < WHEEL_FORTUNE_MAX_SEGMENTS; i++, n++) {
-        segs[n].label = k_bonus_icon_bonus;
-        segs[n].image_src = k_bonus_img_bonus;
-        segs[n].color = lv_color_hex(0x00C853);
-        segs[n].value = BONUS_WHEEL_VAL_BONUS;
-    }
-    for (int i = 0; i < wn && n < WHEEL_FORTUNE_MAX_SEGMENTS; i++, n++) {
-        segs[n].label = k_bonus_icon_nothing;
-        segs[n].image_src = NULL;
-        segs[n].color = lv_color_hex(0x616161);
-        segs[n].value = BONUS_WHEEL_VAL_NOTHING;
-    }
-    for (int i = 0; i < wm && n < WHEEL_FORTUNE_MAX_SEGMENTS; i++, n++) {
-        segs[n].label = k_bonus_icon_malus;
-        segs[n].image_src = k_bonus_img_malus;
-        segs[n].color = lv_color_hex(0xD50000);
-        segs[n].value = BONUS_WHEEL_VAL_MALUS;
-    }
-    for (int i = 0; i < wta && n < WHEEL_FORTUNE_MAX_SEGMENTS; i++, n++) {
-        segs[n].label = k_bonus_icon_timeout_add;
-        segs[n].image_src = k_bonus_img_timeout_add;
-        segs[n].color = lv_color_hex(0xFF6D00); /* deep orange - add time = bad */
-        segs[n].value = BONUS_WHEEL_VAL_TIMEOUT_ADD;
-    }
-    for (int i = 0; i < wtr && n < WHEEL_FORTUNE_MAX_SEGMENTS; i++, n++) {
-        segs[n].label = k_bonus_icon_timeout_remove;
-        segs[n].image_src = k_bonus_img_timeout_remove;
-        segs[n].color = lv_color_hex(0x0091EA); /* light blue - remove time = good */
-        segs[n].value = BONUS_WHEEL_VAL_TIMEOUT_REMOVE;
-    }
+    push_bonus_slices(segs, &n, wb,  k_bonus_text_bonus,  k_bonus_img_bonus,
+                      0x00C853u, BONUS_WHEEL_VAL_BONUS);
+    push_bonus_slices(segs, &n, wn,  k_bonus_text_nothing, NULL,
+                      0x616161u, BONUS_WHEEL_VAL_NOTHING);
+    push_bonus_slices(segs, &n, wm,  k_bonus_text_malus,  k_bonus_img_malus,
+                      0xD50000u, BONUS_WHEEL_VAL_MALUS);
+    /* deep orange - add time = bad */
+    push_bonus_slices(segs, &n, wta, k_bonus_text_timeout_add, k_bonus_img_timeout_add,
+                      0xFF6D00u, BONUS_WHEEL_VAL_TIMEOUT_ADD);
+    /* light blue - remove time = good */
+    push_bonus_slices(segs, &n, wtr, k_bonus_text_timeout_remove, k_bonus_img_timeout_remove,
+                      0x0091EAu, BONUS_WHEEL_VAL_TIMEOUT_REMOVE);
 
     /* Fallback: one of each if all weights are 0 */
     if (n == 0) {
-        segs[0].label = k_bonus_icon_bonus;   segs[0].image_src = k_bonus_img_bonus; segs[0].color = lv_color_hex(0x00C853); segs[0].value = BONUS_WHEEL_VAL_BONUS;
-        segs[1].label = k_bonus_icon_nothing; segs[1].image_src = NULL;              segs[1].color = lv_color_hex(0x616161); segs[1].value = BONUS_WHEEL_VAL_NOTHING;
-        segs[2].label = k_bonus_icon_malus;   segs[2].image_src = k_bonus_img_malus; segs[2].color = lv_color_hex(0xD50000); segs[2].value = BONUS_WHEEL_VAL_MALUS;
-        n = 3;
+        push_bonus_slices(segs, &n, 1, k_bonus_text_bonus,   k_bonus_img_bonus,
+                          0x00C853u, BONUS_WHEEL_VAL_BONUS);
+        push_bonus_slices(segs, &n, 1, k_bonus_text_nothing, NULL,
+                          0x616161u, BONUS_WHEEL_VAL_NOTHING);
+        push_bonus_slices(segs, &n, 1, k_bonus_text_malus,   k_bonus_img_malus,
+                          0xD50000u, BONUS_WHEEL_VAL_MALUS);
     }
     *count = n;
 }
 
+/* ── spin cooldown ──────────────────────────────────────────────────────── */
+
+int64_t game_spin_remaining_seconds(const user_record_t *u)
+{
+    if (!u) return 0;
+    return u->spin_blocked_until - (int64_t)time(NULL);
+}
+
 /* ── spin result handlers ───────────────────────────────────────────────── */
 
-bool game_on_basic_spin(int user_id, int cl_value)
+void game_on_spin_started(int user_id)
+{
+    user_record_t u;
+    if (db_get_user(user_id, &u) != 0) return;
+
+    int64_t now = (int64_t)time(NULL);
+    u.last_spin_epoch = now;
+
+    int cooldown = db_get_config("spin_cooldown_seconds", 0);
+    if (cooldown > 0) {
+        int64_t until = now + cooldown;
+        /* Never shorten a longer block already set by a +Temps modifier. */
+        if (u.spin_blocked_until < until) u.spin_blocked_until = until;
+    }
+
+    db_update_user(&u);
+}
+
+bool game_on_dispense_complete(int user_id, int measured_cl)
 {
     user_record_t u;
     if (db_get_user(user_id, &u) != 0) return false;
 
-    u.total_cl += cl_value;
-    u.last_spin_epoch = (int64_t)time(NULL);
+    if (measured_cl < 0) measured_cl = 0;
+    u.total_cl += measured_cl;
 
     int chance = db_get_config("wheel_trigger_chance", 20);
     bool triggered = false;
-    if ((int)lv_rand(0, 99) < chance) {
+    if ((int)game_rand(0, 99) < chance) {
         u.wheel_trigger++;
         triggered = true;
     }
 
     db_update_user(&u);
-    db_add_cl_history(u.id, u.last_spin_epoch, u.total_cl);
+    /* Stamp the history with the real time of the pour.  Reusing
+     * last_spin_epoch here used to be fine only because the two always
+     * matched; they no longer have to. */
+    db_add_cl_history(u.id, (int64_t)time(NULL), u.total_cl);
     return triggered;
 }
 
 modifier_type_t game_on_bonus_spin(int user_id, uint16_t seg_index,
-                                    const wf_segment_t *segs, uint8_t seg_count)
+                                    const game_segment_t *segs, uint8_t seg_count)
 {
     if (seg_index >= seg_count) return MODIFIER_NONE;
 
@@ -166,6 +236,40 @@ modifier_type_t game_on_bonus_spin(int user_id, uint16_t seg_index,
     if (val == BONUS_WHEEL_VAL_TIMEOUT_ADD)    return MODIFIER_TIMEOUT_ADD;
     if (val == BONUS_WHEEL_VAL_TIMEOUT_REMOVE) return MODIFIER_TIMEOUT_REMOVE;
     return MODIFIER_NONE;
+}
+
+/* Apply @p type to @p rec in place.  Caller persists. */
+static void apply_modifier_to(user_record_t *rec, modifier_type_t type,
+                              int max_bonus, int max_malus, int timeout_s)
+{
+    int64_t now = (int64_t)time(NULL);
+
+    switch (type) {
+        case MODIFIER_BONUS:
+            if (rec->bonus < max_bonus) rec->bonus++;
+            break;
+
+        case MODIFIER_MALUS:
+            if (rec->malus < max_malus) rec->malus++;
+            break;
+
+        case MODIFIER_TIMEOUT_ADD: {
+            /* Anchor to NOW so the block is always in the future regardless of
+             * when the user last spun, and stack onto any existing block. */
+            int64_t base = (rec->spin_blocked_until > now) ? rec->spin_blocked_until : now;
+            rec->spin_blocked_until = base + timeout_s;
+            break;
+        }
+
+        case MODIFIER_TIMEOUT_REMOVE:
+            rec->spin_blocked_until -= timeout_s;
+            if (rec->spin_blocked_until < 0) rec->spin_blocked_until = 0;
+            break;
+
+        case MODIFIER_NONE:
+        default:
+            break;
+    }
 }
 
 void game_apply_modifier(int giver_id, int target_id, modifier_type_t type)
@@ -188,33 +292,19 @@ void game_apply_modifier(int giver_id, int target_id, modifier_type_t type)
         return;
     }
 
-    /* Helper lambda-equivalent: apply effect to a user_record_t */
-#define APPLY_MOD(rec) \
-    do { \
-        if      (type == MODIFIER_BONUS          && (rec).bonus < max_bonus) (rec).bonus++; \
-        else if (type == MODIFIER_MALUS          && (rec).malus < max_malus) (rec).malus++; \
-        else if (type == MODIFIER_TIMEOUT_ADD) { \
-            /* Anchor to NOW so the timeout is always in the future, regardless \
-             * of when the user last spun.  Stack with existing timeout. */ \
-            int64_t _now = (int64_t)time(NULL); \
-            int64_t _base = (rec).last_spin_epoch > _now ? (rec).last_spin_epoch : _now; \
-            (rec).last_spin_epoch = _base + timeout_s; \
-        } \
-        else if (type == MODIFIER_TIMEOUT_REMOVE) { \
-            (rec).last_spin_epoch -= timeout_s; \
-            if ((rec).last_spin_epoch < 0) (rec).last_spin_epoch = 0; \
-        } \
-    } while (0)
-
     if (giver_id == target_id) {
-        APPLY_MOD(giver);
+        apply_modifier_to(&giver, type, max_bonus, max_malus, timeout_s);
         db_update_user(&giver);
-    } else {
-        user_record_t target;
-        if (db_get_user(target_id, &target) != 0) { db_update_user(&giver); return; }
-        APPLY_MOD(target);
-        db_update_user(&giver);
-        db_update_user(&target);
+        return;
     }
-#undef APPLY_MOD
+
+    user_record_t target;
+    if (db_get_user(target_id, &target) != 0) {
+        db_update_user(&giver);
+        return;
+    }
+
+    apply_modifier_to(&target, type, max_bonus, max_malus, timeout_s);
+    db_update_user(&giver);
+    db_update_user(&target);
 }

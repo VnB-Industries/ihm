@@ -7,10 +7,7 @@
 #include <time.h>
 #include <stdio.h>
 #include <string.h>
-#if LV_USE_LOTTIE
-#include <libgen.h>
-#include <unistd.h>
-#endif
+#include "assets.h"
 
 static lv_obj_t    *s_screen;
 static lv_obj_t    *s_wheel;
@@ -26,8 +23,17 @@ static uint32_t     s_confetti_buf[700 * 700];
 static lv_timer_t  *s_confetti_timer = NULL;
 #endif
 
-static wf_segment_t s_segments[WHEEL_FORTUNE_MAX_SEGMENTS];
-static uint8_t      s_seg_count = 0;
+static game_segment_t s_segments[GAME_MAX_SEGMENTS];
+static uint8_t        s_seg_count = 0;
+
+/* ── in-flight pour ─────────────────────────────────────────────────────────
+ * The controller is driven asynchronously: begin_dispense() returns at once
+ * and this timer watches the job until it finishes.  Nothing here blocks the
+ * LVGL loop, which a stalled link used to do for seconds at a time. */
+static lv_timer_t *s_job_timer = NULL;
+static int   s_pending_wheel_cl = 0;
+static bool  s_wheel_pump[GAME_DB_MAX_PUMPS];   /* pumps fed by the wheel value */
+static int   s_pending_pump_count = 0;
 
 /* ── helpers ────────────────────────────────────────────────────────────── */
 
@@ -43,9 +49,7 @@ static void cooldown_timer_cb(lv_timer_t *t)
     user_record_t u;
     if (db_get_user(game_get_active_user(), &u) != 0) return;
 
-    int cooldown = db_get_config("spin_cooldown_seconds", 0);
-    int64_t elapsed  = (int64_t)time(NULL) - u.last_spin_epoch;
-    int64_t remaining = (int64_t)cooldown - elapsed;
+    int64_t remaining = game_spin_remaining_seconds(&u);
 
     if (remaining <= 0) {
         lv_label_set_text(s_cooldown_label, "");
@@ -65,15 +69,12 @@ static void cooldown_timer_cb(lv_timer_t *t)
  * Disables the spin button and starts the 1-s ticker if still cooling down. */
 static void update_cooldown_state(void)
 {
-    /* NOTE: no early-exit for spin_cooldown==0 — a TIMEOUT_ADD modifier sets
-     * last_spin_epoch to a future value, so remaining = spin_cd - elapsed will
-     * be positive even when spin_cd = 0 (elapsed becomes negative). */
+    /* spin_blocked_until covers both the per-spin cooldown and a pending
+     * +Temps / -Temps modifier, so one comparison answers both. */
     user_record_t u;
     if (db_get_user(game_get_active_user(), &u) != 0) return;
 
-    int cooldown = db_get_config("spin_cooldown_seconds", 0);
-    int64_t elapsed   = (int64_t)time(NULL) - u.last_spin_epoch;
-    int64_t remaining = (int64_t)cooldown - elapsed;
+    int64_t remaining = game_spin_remaining_seconds(&u);
 
     if (remaining <= 0) {
         lv_obj_add_flag(s_cooldown_label, LV_OBJ_FLAG_HIDDEN);
@@ -98,25 +99,6 @@ static void update_cooldown_state(void)
 /* ── wheel callback ─────────────────────────────────────────────────────── */
 
 #if LV_USE_LOTTIE
-static const char *resolve_confetti_path(void)
-{
-    static char resolved[512];
-    char exe[512];
-    ssize_t len = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
-    if (len > 0) {
-        exe[len] = '\0';
-        char *dir = dirname(exe);
-        snprintf(resolved, sizeof(resolved), "%s/images/Confetti.json", dir);
-        FILE *f = fopen(resolved, "rb");
-        if (f) { fclose(f); return resolved; }
-    }
-    static const char *candidates[] = { "images/Confetti.json", "../images/Confetti.json" };
-    for (uint32_t i = 0; i < (uint32_t)(sizeof(candidates)/sizeof(candidates[0])); i++) {
-        FILE *f = fopen(candidates[i], "rb");
-        if (f) { fclose(f); return candidates[i]; }
-    }
-    return NULL;
-}
 
 static void confetti_hide_cb(lv_timer_t *t)
 {
@@ -127,7 +109,7 @@ static void confetti_hide_cb(lv_timer_t *t)
 
 static void confetti_preload(lv_obj_t *screen)
 {
-    const char *src = resolve_confetti_path();
+    const char *src = asset_path("images/Confetti.json");
     if (src == NULL || s_confetti != NULL) return;
     s_confetti = lv_lottie_create(screen);
     lv_lottie_set_buffer(s_confetti, 700, 700, s_confetti_buf);
@@ -166,6 +148,161 @@ static void play_confetti_once(void)
 }
 #endif
 
+/* Copy the rules layer's slices into the widget's own representation. */
+static void push_segments_to_wheel(void)
+{
+    wf_segment_t wf_segs[WHEEL_FORTUNE_MAX_SEGMENTS];
+    uint8_t n = s_seg_count;
+    if (n > WHEEL_FORTUNE_MAX_SEGMENTS) n = WHEEL_FORTUNE_MAX_SEGMENTS;
+
+    for (uint8_t i = 0; i < n; i++) {
+        wf_segs[i].label     = s_segments[i].label;
+        wf_segs[i].image_src = s_segments[i].image_src;
+        wf_segs[i].color_rgb = s_segments[i].color_rgb;
+        wf_segs[i].value     = s_segments[i].value;
+    }
+    wheel_fortune_set_segments(s_wheel, wf_segs, n);
+}
+
+/* cL to credit for a finished pour.
+ *
+ * total_cl has always tracked the wheel value - the measure the wheel decided,
+ * not every liquid in the glass - so only the pumps fed by the wheel count.
+ * Using the controller's measurement rather than the request is the point: a
+ * pour cut short by the glass being lifted delivers less than was asked for,
+ * and the leaderboard should say so.  A recipe with no "Roue" pump has nothing
+ * measured to attribute, so it falls back to the nominal value. */
+static int credited_cl_from_job(const serial_job_t *job)
+{
+    bool any_wheel_pump = false;
+    float measured = 0.0f;
+
+    for (int i = 0; i < s_pending_pump_count && i < GAME_DB_MAX_PUMPS; i++) {
+        if (!s_wheel_pump[i]) continue;
+        any_wheel_pump = true;
+        if (i < SERIAL_MAX_PUMPS) measured += job->measured_cl[i];
+    }
+
+    if (!any_wheel_pump) return s_pending_wheel_cl;
+
+    /* Round rather than truncate: 1.97 cL delivered is 2 cL drunk. */
+    return (int)(measured + 0.5f);
+}
+
+static void stop_job_timer(void)
+{
+    if (s_job_timer) {
+        lv_timer_delete(s_job_timer);
+        s_job_timer = NULL;
+    }
+}
+
+/* Describe a failed job in terms the person in front of the machine can act on. */
+static const char *dispense_error_text(const char *code)
+{
+    if (!code) return LV_SYMBOL_WARNING " Distribution refusee";
+
+    if (strncmp(code, "NO_OBJECT", 9) == 0)
+        return LV_SYMBOL_WARNING " Place le verre puis reessaye";
+    if (strncmp(code, "BUSY", 4) == 0)
+        return LV_SYMBOL_WARNING " Distribution deja en cours";
+    if (strncmp(code, "NO_LINK", 7) == 0 || strncmp(code, "LINK_LOST", 9) == 0)
+        return LV_SYMBOL_WARNING " Controleur deconnecte";
+    if (strncmp(code, "MCU_RESET", 9) == 0)
+        return LV_SYMBOL_WARNING " Controleur redemarre, reessaye";
+    if (strncmp(code, "TIMEOUT", 7) == 0 || strncmp(code, "SILENCE", 7) == 0)
+        return LV_SYMBOL_WARNING " Pas de reponse du controleur";
+
+    return LV_SYMBOL_WARNING " Distribution refusee";
+}
+
+/* Watch the active pour through to its end.
+ *
+ * Deliberately keeps running even if the user navigates away: the credit for
+ * a finished pour must land regardless of which screen is showing, and the
+ * screensaver is held off while a job is active. */
+static void job_timer_cb(lv_timer_t *t)
+{
+    (void)t;
+
+    const serial_job_t *job = serial_comm_job();
+
+    switch (job->state) {
+        case SERIAL_JOB_PENDING:
+            return;
+
+        case SERIAL_JOB_RUNNING: {
+            char buf[96];
+            int off = 0;
+            for (int i = 0; i < s_pending_pump_count && off < (int)sizeof(buf); i++) {
+                off += lv_snprintf(buf + off, sizeof(buf) - off, "%sP%d %.1f cL",
+                                   (i == 0 ? "" : " | "), i + 1,
+                                   (double)job->progress_cl[i]);
+            }
+            lv_label_set_text(s_result_label, buf);
+            return;
+        }
+
+        case SERIAL_JOB_DONE: {
+            int credited = credited_cl_from_job(job);
+
+            char buf[96];
+            int off = 0;
+            for (int i = 0; i < s_pending_pump_count && off < (int)sizeof(buf); i++) {
+                off += lv_snprintf(buf + off, sizeof(buf) - off, "%sP%d %.1f cL",
+                                   (i == 0 ? "" : " | "), i + 1,
+                                   (double)job->measured_cl[i]);
+            }
+            lv_label_set_text(s_result_label, buf);
+
+            serial_comm_job_clear();
+            stop_job_timer();
+
+            bool bonus_triggered =
+                game_on_dispense_complete(game_get_active_user(), credited);
+
+            if (bonus_triggered) {
+                lv_obj_clear_flag(s_bonus_btn, LV_OBJ_FLAG_HIDDEN);
+                /* Cooldown still applies after the bonus wheel; it is
+                 * re-checked when SCREEN_WHEEL is entered again. */
+            } else {
+                update_cooldown_state();
+            }
+            return;
+        }
+
+        case SERIAL_JOB_FAILED: {
+            char code[sizeof(job->error)];
+            snprintf(code, sizeof(code), "%s", job->error);
+
+            /* A pour cut short after starting still delivered something, and
+             * the controller measured it.  Credit that before reporting the
+             * failure; a pour refused outright carries no measurement and
+             * credits nothing. */
+            bool partial = job->measured_valid;
+            int  credited = partial ? credited_cl_from_job(job) : 0;
+
+            serial_comm_job_clear();
+            stop_job_timer();
+
+            lv_label_set_text(s_result_label, dispense_error_text(code));
+
+            if (partial && credited > 0)
+                game_on_dispense_complete(game_get_active_user(), credited);
+
+            /* The spin itself already happened, so the cooldown it armed
+             * stands whether or not the pour completed. */
+            update_cooldown_state();
+            return;
+        }
+
+        case SERIAL_JOB_IDLE:
+        default:
+            stop_job_timer();
+            return;
+    }
+}
+
 static void on_wheel_result(lv_obj_t *wf, uint16_t seg_index,
                              const wf_segment_t *seg)
 {
@@ -182,6 +319,11 @@ static void on_wheel_result(lv_obj_t *wf, uint16_t seg_index,
     if (pump_count > GAME_DB_MAX_PUMPS) pump_count = GAME_DB_MAX_PUMPS;
 
     int volumes[GAME_DB_MAX_PUMPS];
+    bool wheel_pump[GAME_DB_MAX_PUMPS];
+    for (int i = 0; i < GAME_DB_MAX_PUMPS; i++) {
+        volumes[i] = 0;
+        wheel_pump[i] = false;
+    }
     int used = 2;
 
     if (pump_count == 2) {
@@ -190,12 +332,10 @@ static void on_wheel_result(lv_obj_t *wf, uint16_t seg_index,
         if (pump2_cl < 0) pump2_cl = 0;
         volumes[0] = wheel_cl;
         volumes[1] = pump2_cl;
+        wheel_pump[0] = true;
         used = 2;
     } else {
         /* Cocktail mode: resolve each pump from the selected recipe. */
-        for (int i = 0; i < pump_count; i++)
-            volumes[i] = 0;
-
         cocktail_pump_t recipe[GAME_DB_MAX_PUMPS];
         int rn = db_get_cocktail_pumps(game_get_selected_cocktail_id(),
                                        recipe, GAME_DB_MAX_PUMPS);
@@ -212,6 +352,7 @@ static void on_wheel_result(lv_obj_t *wf, uint16_t seg_index,
                     break;
                 case COCKTAIL_QTY_WHEEL:
                     cl = wheel_cl;
+                    wheel_pump[idx0] = true;
                     break;
                 default:
                     cl = 0;
@@ -239,33 +380,26 @@ static void on_wheel_result(lv_obj_t *wf, uint16_t seg_index,
         return;
     }
 
-    if (!serial_comm_send_dispense_cl_n(volumes, used)) {
-        const char *resp = serial_comm_last_response();
-        if (resp && strcmp(resp, "ERROR:NO_OBJECT") == 0) {
-            lv_label_set_text(s_result_label, LV_SYMBOL_WARNING " Place le verre puis reessaye");
-        } else {
-            lv_label_set_text(s_result_label, LV_SYMBOL_WARNING " Distribution refusee");
-        }
-        set_spin_btn_enabled(true);
+    /* Stamp the spin and arm its cooldown before the pour: the user has had
+     * their turn whether or not the controller cooperates. */
+    game_on_spin_started(game_get_active_user());
+
+    s_pending_wheel_cl   = wheel_cl;
+    s_pending_pump_count = used;
+    memcpy(s_wheel_pump, wheel_pump, sizeof(s_wheel_pump));
+
+    if (!serial_comm_begin_dispense(volumes, used)) {
+        lv_label_set_text(s_result_label,
+                          dispense_error_text(serial_comm_last_error()));
+        serial_comm_job_clear();
+        update_cooldown_state();
         return;
     }
 
-    char buf[96];
-    int off = 0;
-    for (int i = 0; i < used && off < (int)sizeof(buf); i++) {
-        off += lv_snprintf(buf + off, sizeof(buf) - off,
-                           "%sP%d %d cL", (i == 0 ? "" : " | "),
-                           i + 1, volumes[i]);
-    }
-    lv_label_set_text(s_result_label, buf);
+    lv_label_set_text(s_result_label, "Distribution en cours...");
 
-    bool bonus_triggered = game_on_basic_spin(game_get_active_user(), wheel_cl);
-    if (bonus_triggered) {
-        lv_obj_clear_flag(s_bonus_btn, LV_OBJ_FLAG_HIDDEN);
-        /* Cooldown still applies after bonus wheel; will be checked on SCREEN_WHEEL re-entry */
-    } else {
-        update_cooldown_state();
-    }
+    stop_job_timer();
+    s_job_timer = lv_timer_create(job_timer_cb, 100, NULL);
 }
 
 /* ── event callbacks ────────────────────────────────────────────────────── */
@@ -280,7 +414,7 @@ static void on_spin_clicked(lv_event_t *e)
     lv_obj_add_flag(s_bonus_btn, LV_OBJ_FLAG_HIDDEN);
     set_spin_btn_enabled(false);
 
-    uint16_t result = (uint16_t)(lv_rand(0, 0xFFFF) % s_seg_count);
+    uint16_t result = (uint16_t)game_rand(0, (uint32_t)s_seg_count - 1u);
     wheel_fortune_spin(s_wheel, 3500, result);
 }
 
@@ -289,7 +423,7 @@ static void on_wheel_swipe_spin(lv_obj_t *wf, uint16_t swipe_strength)
     if (lv_obj_has_state(s_spin_btn, LV_STATE_DISABLED)) return;
     if (wheel_fortune_is_spinning(s_wheel) || s_seg_count == 0) return;
 
-    uint16_t result = (uint16_t)(lv_rand(0, 0xFFFF) % s_seg_count);
+    uint16_t result = (uint16_t)game_rand(0, (uint32_t)s_seg_count - 1u);
     uint32_t clamped_strength = LV_MIN((uint32_t)swipe_strength, 144U);
     uint16_t full_turns = (uint16_t)(2U + clamped_strength / 16U);
     uint32_t duration_ms = 4200U + clamped_strength * 12U;
@@ -412,9 +546,11 @@ void scr_gaming_refresh(void)
                 u.name, u.bonus, u.malus);
     lv_label_set_text(s_user_label, buf);
 
-    /* Recompute wheel segments */
+    /* Recompute wheel segments and hand them to the widget.  game_logic speaks
+     * plain structs so it stays testable without a display, so the adaptation
+     * happens here. */
     game_compute_wheel_segments(&u, s_segments, &s_seg_count);
-    wheel_fortune_set_segments(s_wheel, s_segments, s_seg_count);
+    push_segments_to_wheel();
 
     /* Show confirmation if a modifier was just applied by this user */
     if (u.given_modifier != (int)MODIFIER_NONE && u.given_to_id >= 0) {

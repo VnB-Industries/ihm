@@ -10,9 +10,10 @@ extern "C" {
 #define WHEEL_FORTUNE_MAX_SEGMENTS 12
 
 typedef struct {
-    const char *label;
+    const char *label;      /* fallback text, drawn when image_src is absent
+                             * or fails to decode                           */
     const void *image_src;
-    lv_color_t  color;
+    uint32_t    color_rgb;  /* slice fill, 0xRRGGBB                         */
     uint32_t    value;
 } wf_segment_t;
 
