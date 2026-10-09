@@ -74,6 +74,18 @@ Schema SQLite associe:
 - `cocktails(id, name)`
 - `cocktail_pumps(cocktail_id, pump_index, mode, value)`
 
+## Archive et remise a zero des stats
+
+Parametres > Joueurs > Statistiques > "Archiver et remettre a zero" (avec confirmation):
+
+- Les joueurs et tout l'historique cL sont copies dans un fichier SQLite
+  `<base>_archive_YYYYMMDD_HHMMSS.db` (a cote de `game.db`).
+- Les tables `users` et `cl_history` sont ensuite videes, les ids repartent de 1.
+- Reglages de jeu, textes de banniere, calibration et cocktails sont conserves.
+- Si l'archive ne peut pas etre ecrite, rien n'est supprime.
+- Les badges RFID et droits admin sont archives puis supprimes avec les joueurs;
+  le PIN reste l'acces aux Parametres.
+
 ## Calibration pompes
 
 Un onglet Calibration est disponible dans Parametres.

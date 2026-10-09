@@ -5,6 +5,7 @@
 #include <time.h>
 
 static sqlite3 *s_db = NULL;
+static char     s_db_path[256];
 
 /* ── prepared-statement cache ───────────────────────────────────────────────
  * Every query owns a file-static slot that holds its compiled statement.
@@ -172,6 +173,7 @@ int db_init(const char *path)
         fprintf(stderr, "[db] Cannot open %s: %s\n", path, sqlite3_errmsg(s_db));
         return -1;
     }
+    snprintf(s_db_path, sizeof(s_db_path), "%s", path);
 
     /* ON DELETE CASCADE on cl_history and cocktail_pumps is inert unless this
      * is enabled, and it is per-connection, not stored in the file. */
@@ -414,6 +416,85 @@ int db_delete_user(int id)
     int rc = (sqlite3_step(stmt) == SQLITE_DONE) ? 0 : -1;
     sqlite3_reset(stmt);
     return rc;
+}
+
+/* Build "<db stem>_archive_<timestamp>.db" from the open database's path. */
+static int archive_path_make(char *out, size_t n)
+{
+    char stem[sizeof(s_db_path)];
+    snprintf(stem, sizeof(stem), "%s", s_db_path);
+    size_t len = strlen(stem);
+    if (len > 3 && strcmp(stem + len - 3, ".db") == 0)
+        stem[len - 3] = '\0';
+
+    time_t now = time(NULL);
+    struct tm tm_now;
+    localtime_r(&now, &tm_now);
+    char ts[20];
+    strftime(ts, sizeof(ts), "%Y%m%d_%H%M%S", &tm_now);
+
+    int w = snprintf(out, n, "%s_archive_%s.db", stem, ts);
+    return (w > 0 && (size_t)w < n) ? 0 : -1;
+}
+
+int db_archive_and_reset_stats(char *archive_out, size_t archive_out_size)
+{
+    if (!s_db) return -1;
+
+    char path[sizeof(s_db_path) + 32];
+    if (archive_path_make(path, sizeof(path)) != 0) return -1;
+
+    /* Never overwrite an earlier archive (two resets within one second). */
+    FILE *probe = fopen(path, "r");
+    if (probe) {
+        fclose(probe);
+        fprintf(stderr, "[db] archive %s already exists\n", path);
+        return -1;
+    }
+
+    sqlite3_stmt *att = NULL;
+    if (sqlite3_prepare_v2(s_db, "ATTACH DATABASE ? AS arc;", -1, &att, NULL) != SQLITE_OK) {
+        fprintf(stderr, "[db] attach prepare failed: %s\n", sqlite3_errmsg(s_db));
+        return -1;
+    }
+    sqlite3_bind_text(att, 1, path, -1, SQLITE_STATIC);
+    int rc = sqlite3_step(att);
+    sqlite3_finalize(att);
+    if (rc != SQLITE_DONE) {
+        fprintf(stderr, "[db] cannot create archive %s: %s\n", path, sqlite3_errmsg(s_db));
+        return -1;
+    }
+
+    /* Archive first and commit it on its own: the wipe below only runs once
+     * the archive is safely on disk. */
+    int ok = exec_sql(
+        "BEGIN;"
+        "CREATE TABLE arc.users       AS SELECT * FROM main.users;"
+        "CREATE TABLE arc.cl_history  AS SELECT * FROM main.cl_history;"
+        "COMMIT;") == SQLITE_OK;
+
+    if (ok) {
+        ok = exec_sql(
+            "BEGIN;"
+            "DELETE FROM main.cl_history;"
+            "DELETE FROM main.users;"
+            "DELETE FROM main.sqlite_sequence"
+            " WHERE name IN ('users','cl_history');"
+            "COMMIT;") == SQLITE_OK;
+    }
+
+    if (!ok) exec_sql_quiet("ROLLBACK;");
+    exec_sql_quiet("DETACH DATABASE arc;");
+
+    if (!ok) {
+        /* An archive of a reset that never happened is only clutter. */
+        remove(path);
+        return -1;
+    }
+
+    if (archive_out && archive_out_size > 0)
+        snprintf(archive_out, archive_out_size, "%s", path);
+    return 0;
 }
 
 int db_prune_cl_history(int user_id, int keep)

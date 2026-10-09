@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <termios.h>
 #include <time.h>
 #include <unistd.h>
@@ -258,6 +259,12 @@ bool serial_comm_init(void)
         return false;
     }
 
+    /* Exclusive access: a second reader on the tty (minicom, cat, a stray
+     * instance) steals bytes and splits reply lines, so acks get lost. */
+    if (ioctl(fd, TIOCEXCL) != 0) {
+        fprintf(stderr, "[serial] TIOCEXCL failed: %s\n", strerror(errno));
+    }
+
     s_serial_fd = fd;
     s_rx_len = 0;
     s_rx_buf[0] = '\0';
@@ -318,7 +325,8 @@ static void serial_fill_rx(void)
         }
 
         if (n == 0) {
-            serial_mark_disconnected();
+            /* VMIN=0/VTIME=0 on a non-blocking tty returns 0 when idle, it is
+             * not EOF.  A real unplug surfaces as EIO/ENODEV below. */
             return;
         }
 
@@ -472,6 +480,9 @@ static void serial_handle_line(const char *line)
 
         if (strncmp(rest, "PROGRESS:", 9) == 0) {
             if (s_job.state == SERIAL_JOB_RUNNING) {
+                /* PROGRESS is the heartbeat: without this the silence timer
+                 * only sees sequenced replies and fires on any pour > 5 s. */
+                s_job_last_rx_ms = serial_now_ms();
                 float vals[SERIAL_MAX_PUMPS];
                 int n = parse_floats(rest + 9, vals, SERIAL_MAX_PUMPS);
                 for (int i = 0; i < n && i < SERIAL_MAX_PUMPS; i++) {
@@ -599,6 +610,10 @@ void serial_comm_poll(void)
 
     if (s_job.state == SERIAL_JOB_PENDING
             && now - s_job_sent_ms > SERIAL_ACK_TIMEOUT_MS) {
+        /* A missing ack does not mean the command was not obeyed: the
+         * controller may have started the pumps and only the STARTED reply
+         * got lost.  Stop them before giving up on the job. */
+        serial_comm_send_stop();
         job_fail("TIMEOUT");
         return;
     }

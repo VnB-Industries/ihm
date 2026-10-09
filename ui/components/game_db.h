@@ -5,6 +5,7 @@
 extern "C" {
 #endif
 
+#include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -71,6 +72,15 @@ int  db_get_user_by_rfid(const char *tag, user_record_t *out);
 /** Set or clear the RFID tag for user @p user_id.
  *  Pass NULL or "" to unlink.  Returns 0 on success. */
 int  db_set_user_rfid(int user_id, const char *tag);
+
+/** Copy every player and the whole cL history into a new, timestamped
+ *  SQLite file next to the database (<db stem>_archive_YYYYMMDD_HHMMSS.db),
+ *  then empty both tables and restart their ids.  Game config, text config
+ *  and cocktails are left untouched.
+ *  If the archive cannot be written nothing is deleted.
+ *  The archive path is copied to @p archive_out when it is not NULL.
+ *  Returns 0 on success, -1 on error. */
+int  db_archive_and_reset_stats(char *archive_out, size_t archive_out_size);
 
 /* ── cL history (for evolution graph) ─────────────────────────────────── */
 

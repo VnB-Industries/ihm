@@ -6,6 +6,7 @@
 #include "game_logic.h"
 #include "game_db.h"
 
+#include <sqlite3.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -151,6 +152,67 @@ static void test_foreign_keys_cascade_history(void)
     /* Without PRAGMA foreign_keys=ON these rows would survive forever. */
     int left = db_get_cl_history(id, pts, 16);
     CHECK(left == 0, "history not cascaded: %d rows left", left);
+}
+
+static int count_rows(const char *file, const char *table)
+{
+    sqlite3 *db = NULL;
+    sqlite3_stmt *st = NULL;
+    char sql[96];
+    int n = -1;
+
+    snprintf(sql, sizeof(sql), "SELECT COUNT(*) FROM %s;", table);
+    if (sqlite3_open_v2(file, &db, SQLITE_OPEN_READONLY, NULL) == SQLITE_OK &&
+        sqlite3_prepare_v2(db, sql, -1, &st, NULL) == SQLITE_OK &&
+        sqlite3_step(st) == SQLITE_ROW)
+        n = sqlite3_column_int(st, 0);
+    sqlite3_finalize(st);
+    sqlite3_close(db);
+    return n;
+}
+
+static void test_archive_and_reset_stats(void)
+{
+    fresh_db();
+    db_set_config("max_bonus_stack", 9);
+    db_set_text_config("home_banner_text_2", "kept");
+    int cid = db_add_cocktail("Mauresque");
+
+    int a = db_add_user("Alice");
+    int b = db_add_user("Bob");
+    user_record_t u;
+    db_get_user(a, &u);
+    u.total_cl = 42;
+    db_update_user(&u);
+    db_add_cl_history(a, 1000, 42);
+    db_add_cl_history(b, 1001, 7);
+
+    char arc[320] = "";
+    CHECK(db_archive_and_reset_stats(arc, sizeof(arc)) == 0, "archive+reset failed");
+    CHECK(arc[0] != '\0', "archive path not reported");
+
+    /* Archive holds what was wiped. */
+    CHECK(count_rows(arc, "users") == 2, "archive users");
+    CHECK(count_rows(arc, "cl_history") == 2, "archive history");
+
+    /* Live database is blank... */
+    user_record_t all[GAME_DB_MAX_USERS];
+    CHECK(db_get_all_users(all, GAME_DB_MAX_USERS) == 0, "users not wiped");
+    cl_history_point_t pts[8];
+    CHECK(db_get_cl_history(a, pts, 8) == 0, "history not wiped");
+
+    /* ...ids restart... */
+    CHECK(db_add_user("Carol") == 1, "ids did not restart");
+
+    /* ...and every other setting survives. */
+    CHECK(db_get_config("max_bonus_stack", 0) == 9, "config lost");
+    char txt[32];
+    db_get_text_config("home_banner_text_2", txt, sizeof(txt), "");
+    CHECK(strcmp(txt, "kept") == 0, "text config lost");
+    cocktail_record_t ck[4];
+    CHECK(db_get_all_cocktails(ck, 4) == 1 && ck[0].id == cid, "cocktail lost");
+
+    unlink(arc);
 }
 
 static void test_history_pruning(void)
@@ -451,6 +513,7 @@ int main(void)
         {"update_user_persists_name_and_tag", test_update_user_persists_name_and_tag},
         {"empty_tag_is_null_not_shared",      test_empty_tag_is_null_not_shared},
         {"foreign_keys_cascade_history",      test_foreign_keys_cascade_history},
+        {"archive_and_reset_stats",           test_archive_and_reset_stats},
         {"history_pruning",                   test_history_pruning},
         {"config_cache_coherent",             test_config_cache_coherent},
         {"spin_cooldown_arms_blocked_until",  test_spin_cooldown_arms_blocked_until},

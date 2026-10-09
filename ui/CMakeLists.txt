@@ -1,5 +1,12 @@
 cmake_minimum_required(VERSION 3.15)
 
+# With no build type CMake adds no -O flag, and LVGL/ThorVG then render
+# unoptimized.  On the Pi that saturates the CPU and starves the USB host
+# driver, which drops the controller mid-pour.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+
 project(ihm LANGUAGES C CXX)
 
 # Use C11 to avoid GCC 13+ emitting __isoc23_strtol@GLIBC_2.38

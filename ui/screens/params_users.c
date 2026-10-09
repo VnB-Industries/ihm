@@ -2,6 +2,7 @@
 #include "scr_parameters.h"
 #include "screen_manager.h"
 #include "game_db.h"
+#include "game_logic.h"
 #include "serial_comm.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,6 +20,8 @@ static lv_obj_t *s_user_list;
 static lv_obj_t *s_new_user_ta;
 static lv_obj_t *s_delete_popup;
 static lv_obj_t *s_delete_popup_label;
+static lv_obj_t *s_reset_popup;
+static lv_obj_t *s_reset_status;
 static int        s_pending_delete_uid = -1;
 static char       s_pending_delete_name[GAME_DB_NAME_LEN];
 static lv_obj_t   *s_params_rfid_popup;
@@ -40,6 +43,9 @@ static void on_params_rfid_close(lv_event_t *e);
 static void on_delete_confirmed(lv_event_t *e);
 static void on_delete_cancelled(lv_event_t *e);
 static void on_add_user_clicked(lv_event_t *e);
+static void on_reset_clicked(lv_event_t *e);
+static void on_reset_confirmed(lv_event_t *e);
+static void on_reset_cancelled(lv_event_t *e);
 
 static lv_obj_t *create_textarea_row(lv_obj_t *parent, const char *caption,
                                      const char *placeholder,
@@ -188,6 +194,48 @@ static void on_delete_confirmed(lv_event_t *e)
         lv_obj_add_flag(s_delete_popup, LV_OBJ_FLAG_HIDDEN);
         params_users_refresh_list();
     }
+}
+
+/* Archive every player and their stats to a file, then start from a blank
+ * player table.  Game settings and cocktails are not touched. */
+static void on_reset_clicked(lv_event_t *e)
+{
+    (void)e;
+    lv_obj_clear_flag(s_reset_popup, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(s_reset_popup);
+}
+
+static void on_reset_cancelled(lv_event_t *e)
+{
+    (void)e;
+    lv_obj_add_flag(s_reset_popup, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void on_reset_confirmed(lv_event_t *e)
+{
+    (void)e;
+    lv_obj_add_flag(s_reset_popup, LV_OBJ_FLAG_HIDDEN);
+
+    char path[320];
+    if (db_archive_and_reset_stats(path, sizeof(path)) != 0) {
+        lv_label_set_text(s_reset_status,
+            LV_SYMBOL_WARNING "  Echec de l'archivage, rien n'a ete supprime");
+        lv_obj_set_style_text_color(s_reset_status,
+                                    lv_color_hex(0xE94560), LV_PART_MAIN);
+        return;
+    }
+
+    /* The selected player no longer exists. */
+    game_set_active_user(-1);
+    params_users_refresh_list();
+
+    const char *base = strrchr(path, '/');
+    char msg[200];
+    lv_snprintf(msg, sizeof(msg), LV_SYMBOL_OK "  Archive : %s",
+                base ? base + 1 : path);
+    lv_label_set_text(s_reset_status, msg);
+    lv_obj_set_style_text_color(s_reset_status,
+                                lv_color_hex(0x00C853), LV_PART_MAIN);
 }
 
 static void on_delete_cancelled(lv_event_t *e)
@@ -357,6 +405,20 @@ void params_users_build(lv_obj_t *tab)
     lv_obj_set_flex_flow(s_user_list, LV_FLEX_FLOW_COLUMN);
     lv_obj_clear_flag(s_user_list, LV_OBJ_FLAG_SCROLLABLE);
 
+    params_add_section_label(sc_players, "Statistiques");
+
+    lv_obj_t *btn_reset = lv_btn_create(sc_players);
+    lv_obj_set_size(btn_reset, 380, 46);
+    lv_obj_set_style_bg_color(btn_reset, lv_color_hex(0xD50000), LV_PART_MAIN);
+    lv_obj_add_event_cb(btn_reset, on_reset_clicked, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *lbl_reset = lv_label_create(btn_reset);
+    lv_label_set_text(lbl_reset, LV_SYMBOL_SAVE "  Archiver et remettre a zero");
+    lv_obj_center(lbl_reset);
+
+    s_reset_status = lv_label_create(sc_players);
+    lv_label_set_text(s_reset_status, "");
+    lv_label_set_long_mode(s_reset_status, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(s_reset_status, SCREEN_INNER_W - 28);
 }
 
 void params_users_build_overlays(lv_obj_t *parent)
@@ -405,6 +467,50 @@ void params_users_build_overlays(lv_obj_t *parent)
     lv_obj_t *lbl_confirm_delete = lv_label_create(btn_confirm_delete);
     lv_label_set_text(lbl_confirm_delete, LV_SYMBOL_TRASH "  Supprimer");
     lv_obj_center(lbl_confirm_delete);
+
+    /* ── Archive + reset confirmation popup ─────────────────────────── */
+    s_reset_popup = lv_obj_create(params_screen);
+    lv_obj_set_size(s_reset_popup, 460, 230);
+    lv_obj_align(s_reset_popup, LV_ALIGN_CENTER, 0, -30);
+    lv_obj_set_style_bg_color(s_reset_popup, lv_color_hex(0x16213E), LV_PART_MAIN);
+    lv_obj_set_style_border_width(s_reset_popup, 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(s_reset_popup, 12, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(s_reset_popup, 16, LV_PART_MAIN);
+    lv_obj_clear_flag(s_reset_popup, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_reset_popup, LV_OBJ_FLAG_HIDDEN);
+
+    lv_obj_t *reset_title = lv_label_create(s_reset_popup);
+    lv_label_set_text(reset_title, LV_SYMBOL_WARNING "  Confirmation");
+    lv_obj_set_style_text_color(reset_title, lv_color_hex(0xF5C518), LV_PART_MAIN);
+    lv_obj_align(reset_title, LV_ALIGN_TOP_MID, 0, 0);
+
+    lv_obj_t *reset_msg = lv_label_create(s_reset_popup);
+    lv_label_set_text(reset_msg,
+        "Les joueurs et leurs stats seront archives dans un fichier, "
+        "puis la liste sera videe. Les reglages sont conserves.");
+    lv_obj_set_width(reset_msg, 400);
+    lv_obj_set_style_text_align(reset_msg, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_set_style_text_color(reset_msg, lv_color_hex(0xEAEAEA), LV_PART_MAIN);
+    lv_label_set_long_mode(reset_msg, LV_LABEL_LONG_WRAP);
+    lv_obj_align(reset_msg, LV_ALIGN_TOP_MID, 0, 42);
+
+    lv_obj_t *btn_reset_no = lv_btn_create(s_reset_popup);
+    lv_obj_set_size(btn_reset_no, 150, 42);
+    lv_obj_align(btn_reset_no, LV_ALIGN_BOTTOM_LEFT, 0, 0);
+    lv_obj_set_style_bg_color(btn_reset_no, lv_color_hex(0x444444), LV_PART_MAIN);
+    lv_obj_add_event_cb(btn_reset_no, on_reset_cancelled, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *lbl_reset_no = lv_label_create(btn_reset_no);
+    lv_label_set_text(lbl_reset_no, LV_SYMBOL_CLOSE "  Annuler");
+    lv_obj_center(lbl_reset_no);
+
+    lv_obj_t *btn_reset_yes = lv_btn_create(s_reset_popup);
+    lv_obj_set_size(btn_reset_yes, 190, 42);
+    lv_obj_align(btn_reset_yes, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
+    lv_obj_set_style_bg_color(btn_reset_yes, lv_color_hex(0xD50000), LV_PART_MAIN);
+    lv_obj_add_event_cb(btn_reset_yes, on_reset_confirmed, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *lbl_reset_yes = lv_label_create(btn_reset_yes);
+    lv_label_set_text(lbl_reset_yes, LV_SYMBOL_SAVE "  Archiver");
+    lv_obj_center(lbl_reset_yes);
 
     /* ── RFID enrollment popup ──────────────────────────────────────── */
     s_params_rfid_popup = lv_obj_create(params_screen);
@@ -472,6 +578,7 @@ void params_users_refresh(void)
     lv_textarea_set_text(s_banner_ta_2, b2);
     lv_textarea_set_text(s_banner_ta_3, b3);
 
+    lv_label_set_text(s_reset_status, "");
     params_users_refresh_list();
 }
 
@@ -497,6 +604,8 @@ void params_users_leave(void)
         lv_obj_add_flag(s_params_rfid_popup, LV_OBJ_FLAG_HIDDEN);
     if (s_delete_popup)
         lv_obj_add_flag(s_delete_popup, LV_OBJ_FLAG_HIDDEN);
+    if (s_reset_popup)
+        lv_obj_add_flag(s_reset_popup, LV_OBJ_FLAG_HIDDEN);
 
     s_pending_delete_uid     = -1;
     s_pending_delete_name[0] = '\0';

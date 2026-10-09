@@ -55,12 +55,6 @@ void scr_glass_select_init(void)
     lv_obj_set_style_text_color(s_user_label, lv_color_hex(0xEAEAEA), LV_PART_MAIN);
     lv_obj_align(s_user_label, LV_ALIGN_TOP_MID, 0, 56);
 
-    lv_obj_t *hint = lv_label_create(s_screen);
-    lv_label_set_text(hint, "Le volume roue va dans Pump1.\nPump2 complete le verre.");
-    lv_obj_set_style_text_color(hint, lv_color_hex(0xAAAAAA), LV_PART_MAIN);
-    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-    lv_obj_align(hint, LV_ALIGN_TOP_MID, 0, 90);
-
     lv_obj_t *cont = lv_obj_create(s_screen);
     lv_obj_set_size(cont, SCREEN_INNER_W, 260);
     lv_obj_align(cont, LV_ALIGN_CENTER, 0, 20);
