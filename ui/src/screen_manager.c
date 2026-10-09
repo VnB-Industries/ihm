@@ -66,16 +66,21 @@ static void on_indev_touch_event(lv_event_t *e)
     }
 }
 
+void screen_manager_attach_input(lv_indev_t *indev)
+{
+    if(!indev || lv_indev_get_type(indev) != LV_INDEV_TYPE_POINTER) return;
+
+    lv_indev_add_event_cb(indev, on_indev_touch_event, LV_EVENT_PRESSED, NULL);
+    lv_indev_add_event_cb(indev, on_indev_touch_event, LV_EVENT_PRESSING, NULL);
+    lv_indev_add_event_cb(indev, on_indev_touch_event, LV_EVENT_RELEASED, NULL);
+    lv_indev_add_event_cb(indev, on_indev_touch_event, LV_EVENT_CLICKED, NULL);
+}
+
 static void register_input_activity_hooks(void)
 {
     lv_indev_t *indev = lv_indev_get_next(NULL);
     while(indev) {
-        if(lv_indev_get_type(indev) == LV_INDEV_TYPE_POINTER) {
-            lv_indev_add_event_cb(indev, on_indev_touch_event, LV_EVENT_PRESSED, NULL);
-            lv_indev_add_event_cb(indev, on_indev_touch_event, LV_EVENT_PRESSING, NULL);
-            lv_indev_add_event_cb(indev, on_indev_touch_event, LV_EVENT_RELEASED, NULL);
-            lv_indev_add_event_cb(indev, on_indev_touch_event, LV_EVENT_CLICKED, NULL);
-        }
+        screen_manager_attach_input(indev);
         indev = lv_indev_get_next(indev);
     }
 }

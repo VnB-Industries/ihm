@@ -27,7 +27,6 @@ set(IHM_LV_DRIVERS_DIR "${CMAKE_CURRENT_LIST_DIR}/third_party/lv_drivers" CACHE 
 set(IHM_LV_CONF_PATH "${CMAKE_CURRENT_LIST_DIR}/lv_conf.h" CACHE FILEPATH "Path to the LVGL configuration header")
 set(IHM_DB_PATH "./game.db" CACHE STRING "Runtime path to the SQLite database")
 set(IHM_FBDEV_DEVICE "/dev/fb0" CACHE STRING "Framebuffer device path")
-set(IHM_EVDEV_DEVICE "/dev/input/event0" CACHE STRING "Input event device path")
 set(IHM_DRM_DEVICE "/dev/dri/card0" CACHE STRING "DRM card device path")
 set(IHM_SERIAL_DEVICE "/dev/ttyACM*" CACHE STRING "USB serial device path or glob pattern to microcontroller")
 set(IHM_SERIAL_BAUD 115200 CACHE STRING "USB serial baud rate")
@@ -171,7 +170,6 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE
     SCREEN_H=${IHM_SCREEN_HEIGHT}
     IHM_DB_PATH=\"${IHM_DB_PATH}\"
     IHM_FBDEV_DEVICE=\"${IHM_FBDEV_DEVICE}\"
-    IHM_EVDEV_DEVICE=\"${IHM_EVDEV_DEVICE}\"
     IHM_DRM_DEVICE=\"${IHM_DRM_DEVICE}\"
     IHM_SERIAL_DEVICE=\"${IHM_SERIAL_DEVICE}\"
     IHM_SERIAL_BAUD=${IHM_SERIAL_BAUD}

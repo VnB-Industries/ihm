@@ -160,7 +160,8 @@ Important: sur Raspberry Pi, le build utilise les backends Linux integres de LVG
 - `pkg-config`
 - `sqlite3` + fichiers de dev (`sqlite3.pc`)
 - Selon backend Linux:
-  - FBDEV: acces a `/dev/fb0` et `/dev/input/eventX`
+  - FBDEV: acces a `/dev/fb0` et `/dev/input/event*` (l'ecran tactile est
+    detecte automatiquement, y compris s'il est rebranche)
   - DRM: `libdrm` + acces a `/dev/dri/card0`
 
 ## Build et execution
@@ -213,8 +214,7 @@ cmake -S . -B build-rpi-mount \
   -DIHM_USE_LINUX_FBDEV=ON \
   -DIHM_USE_LINUX_DRM=OFF \
   -DIHM_SCREEN_WIDTH=1024 \
-  -DIHM_SCREEN_HEIGHT=600 \
-  -DIHM_EVDEV_DEVICE=/dev/input/event2
+  -DIHM_SCREEN_HEIGHT=600
 cmake --build build-rpi-mount -j$(nproc)
 ```
 

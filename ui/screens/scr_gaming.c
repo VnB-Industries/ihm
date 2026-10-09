@@ -1,6 +1,7 @@
 #include "scr_gaming.h"
 #include "screen_manager.h"
 #include "wheel_fortune.h"
+#include "glass_fill.h"
 #include "game_logic.h"
 #include "game_db.h"
 #include "serial_comm.h"
@@ -16,6 +17,8 @@ static lv_obj_t    *s_result_label;
 static lv_obj_t    *s_cooldown_label;
 static lv_obj_t    *s_spin_btn;
 static lv_obj_t    *s_bonus_btn;
+static lv_obj_t    *s_glass;
+static lv_timer_t  *s_glass_timer = NULL;
 static lv_timer_t  *s_cooldown_timer = NULL;
 #if LV_USE_LOTTIE
 static lv_obj_t    *s_confetti = NULL;
@@ -37,6 +40,8 @@ static bool  s_spin_recorded = false;
 static int   s_pending_wheel_cl = 0;
 static bool  s_wheel_pump[GAME_DB_MAX_PUMPS];   /* pumps fed by the wheel value */
 static int   s_pending_pump_count = 0;
+
+#define GLASS_SHOW_MS 3000   /* how long the full glass stays after a pour */
 
 /* ── helpers ────────────────────────────────────────────────────────────── */
 
@@ -205,6 +210,37 @@ static void record_spin_once(void)
     game_on_spin_started(s_pending_user_id);
 }
 
+/* The glass takes the wheel's place while a pour runs. */
+static void show_glass(bool on)
+{
+    if (s_glass_timer) {
+        lv_timer_delete(s_glass_timer);
+        s_glass_timer = NULL;
+    }
+    if (on) {
+        lv_obj_add_flag(s_wheel, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(s_glass, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(s_glass, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(s_wheel, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void glass_timer_cb(lv_timer_t *t)
+{
+    (void)t;
+    s_glass_timer = NULL;   /* one-shot: LVGL deletes it after this call */
+    show_glass(false);
+}
+
+/* Leave the finished glass on show for a moment, then bring the wheel back. */
+static void show_wheel_later(void)
+{
+    if (s_glass_timer) lv_timer_delete(s_glass_timer);
+    s_glass_timer = lv_timer_create(glass_timer_cb, GLASS_SHOW_MS, NULL);
+    lv_timer_set_repeat_count(s_glass_timer, 1);
+}
+
 static void stop_job_timer(void)
 {
     if (s_job_timer) {
@@ -251,15 +287,7 @@ static void job_timer_cb(lv_timer_t *t)
 
         case SERIAL_JOB_RUNNING: {
             record_spin_once();
-
-            char buf[96];
-            int off = 0;
-            for (int i = 0; i < s_pending_pump_count && off < (int)sizeof(buf); i++) {
-                off += lv_snprintf(buf + off, sizeof(buf) - off, "%sP%d %.1f cL",
-                                   (i == 0 ? "" : " | "), i + 1,
-                                   (double)job->progress_cl[i]);
-            }
-            lv_label_set_text(s_result_label, buf);
+            glass_fill_set_levels(s_glass, job->progress_cl, s_pending_pump_count);
             return;
         }
 
@@ -274,6 +302,8 @@ static void job_timer_cb(lv_timer_t *t)
                                    (double)job->measured_cl[i]);
             }
             lv_label_set_text(s_result_label, buf);
+            glass_fill_set_levels(s_glass, job->measured_cl, s_pending_pump_count);
+            show_wheel_later();
 
             serial_comm_job_clear();
             stop_job_timer();
@@ -307,6 +337,14 @@ static void job_timer_cb(lv_timer_t *t)
              * credits nothing. */
             bool partial = job->measured_valid;
             int  credited = partial ? credited_cl_from_job(job) : 0;
+
+            /* Show what actually reached the glass; a refused pour poured nothing. */
+            if (partial) {
+                glass_fill_set_levels(s_glass, job->measured_cl, s_pending_pump_count);
+                show_wheel_later();
+            } else {
+                show_glass(false);
+            }
 
             serial_comm_job_clear();
             stop_job_timer();
@@ -447,6 +485,13 @@ static void on_wheel_result(lv_obj_t *wf, uint16_t seg_index,
 
     lv_label_set_text(s_result_label, "Distribution en cours...");
 
+    /* An empty glass sized to the selection; a recipe asking for more than
+     * the glass holds still ends up full rather than spilling off the top. */
+    int requested_total = 0;
+    for (int i = 0; i < used; i++) requested_total += volumes[i];
+    glass_fill_set_capacity(s_glass, (float)LV_MAX(glass_cl, requested_total));
+    show_glass(true);
+
     stop_job_timer();
     s_job_timer = lv_timer_create(job_timer_cb, 100, NULL);
 }
@@ -458,6 +503,9 @@ static void on_spin_clicked(lv_event_t *e)
     (void)e;
     if (lv_obj_has_state(s_spin_btn, LV_STATE_DISABLED)) return;
     if (wheel_fortune_is_spinning(s_wheel) || s_seg_count == 0) return;
+
+    /* Spun while the last glass is still on show: the wheel comes back now. */
+    show_glass(false);
 
     lv_label_set_text(s_result_label, "...");
     lv_obj_add_flag(s_bonus_btn, LV_OBJ_FLAG_HIDDEN);
@@ -514,6 +562,11 @@ void scr_gaming_init(void)
     lv_obj_align(s_wheel, LV_ALIGN_LEFT_MID, 180, 10);
     wheel_fortune_set_result_cb(s_wheel, on_wheel_result);
     wheel_fortune_set_spin_request_cb(s_wheel, on_wheel_swipe_spin);
+
+    /* Glass filling up during a pour, shown in the wheel's place */
+    s_glass = glass_fill_create(s_screen, 240, 340);
+    lv_obj_align_to(s_glass, s_wheel, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_add_flag(s_glass, LV_OBJ_FLAG_HIDDEN);
 
     /* User name + modifier info — top right */
     s_user_label = lv_label_create(s_screen);
@@ -604,6 +657,7 @@ void scr_gaming_refresh(void)
     /* Show confirmation if a modifier was just applied by this user.  The
      * flag, not the stored given_* fields, says "just": those persist. */
     bool announce = game_take_modifier_announce();
+    show_glass(s_job_timer != NULL);
     if (s_job_timer) {
         /* Back on this screen while an earlier pour is still running. */
         lv_label_set_text(s_result_label, "Distribution en cours...");

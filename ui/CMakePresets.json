@@ -13,8 +13,7 @@
         "IHM_USE_LINUX_FBDEV": "ON",
         "IHM_USE_LINUX_DRM": "OFF",
         "IHM_SCREEN_WIDTH": "1024",
-        "IHM_SCREEN_HEIGHT": "600",
-        "IHM_EVDEV_DEVICE": "/dev/input/event2"
+        "IHM_SCREEN_HEIGHT": "600"
       }
     }
   ],

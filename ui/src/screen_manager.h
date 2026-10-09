@@ -19,6 +19,7 @@ extern "C" {
 
 #include <stdbool.h>
 #include <stdint.h>
+#include "lvgl/lvgl.h"
 
 typedef enum {
     SCREEN_HOME = 0,
@@ -42,6 +43,11 @@ screen_id_t  screen_manager_current(void);
  * timer; exposed only so a modal flow can keep the link moving while it owns
  * the UI. */
 void         screen_manager_service_serial(void);
+
+/* Hook a pointer input into the inactivity clock and the screensaver wake-up.
+ * Inputs present at screen_manager_init() are hooked automatically; call this
+ * for one that appears later (a touchscreen re-plugged). */
+void         screen_manager_attach_input(lv_indev_t *indev);
 
 /* ── RFID enrollment ─────────────────────────────────────────────── */
 

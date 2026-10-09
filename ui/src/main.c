@@ -100,6 +100,9 @@ int main(void)
     }
 
     screen_manager_init();
+    /* A touchscreen that turns up later (USB re-enumeration) gets the same
+     * activity hooks as the ones screen_manager_init() found. */
+    platform_linux_set_pointer_added_cb(screen_manager_attach_input);
     screen_manager_load(SCREEN_HOME);
 
     while(!s_shutdown_requested) {
