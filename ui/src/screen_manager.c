@@ -50,7 +50,6 @@ static int        s_enroll_uid      = -1;
 static uint32_t   s_enroll_deadline = 0;
 static void     (*s_enroll_cb)(rfid_enroll_result_t) = NULL;
 static lv_timer_t *s_rfid_timer = NULL;
-static bool s_rfid_poll_enabled = true;
 
 static void inactivity_reset(void)
 {
@@ -112,10 +111,6 @@ static void serial_tick(lv_timer_t *t)
 
     serial_comm_poll();
 
-    if (!s_rfid_poll_enabled) {
-        return;
-    }
-
     char tag[32] = {0};
     bool got_tag = serial_comm_read_rfid(tag, sizeof(tag));
 
@@ -150,6 +145,11 @@ static void serial_tick(lv_timer_t *t)
 
     /* ── Normal dispatch ── */
     if (!got_tag) return;
+
+    /* A badge must not hand the machine to someone else while a pour,
+     * calibration or purge is running: its outcome belongs to whoever
+     * started it.  The tag is dropped, not queued for later. */
+    if (serial_comm_job_active()) return;
 
     user_record_t u;
     if (db_get_user_by_rfid(tag, &u) != 0) return;  /* unknown tag */
@@ -235,9 +235,4 @@ void screen_manager_rfid_enroll_cancel(void)
 {
     s_enroll_uid = -1;
     s_enroll_cb  = NULL;
-}
-
-void screen_manager_set_rfid_poll_enabled(bool enabled)
-{
-    s_rfid_poll_enabled = enabled;
 }

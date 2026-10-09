@@ -168,7 +168,6 @@ void params_calib_stop_ui(bool send_stop)
     }
 
     s_calib_running = false;
-    screen_manager_set_rfid_poll_enabled(true);
 
     for (int i = 0; i < params_pump_count; i++)
         if (s_calib_pump_btn[i])
@@ -331,13 +330,13 @@ static void on_calib_start_clicked(lv_event_t *e)
     int pump_index = s_calib_pump_sel + 1;
     if (!serial_comm_begin_calibration(pump_index, qty_cl)) {
         calib_set_status(LV_SYMBOL_WARNING "  Echec calibration", 0xE94560);
-        serial_comm_job_clear();
+        /* Refused because another job (a pour, a purge) is running: that job
+         * is not ours to discard. */
+        if (!serial_comm_job_active())
+            serial_comm_job_clear();
         return;
     }
 
-    /* RFID polling consumes from the same link; the job owns it until the run
-     * ends. */
-    screen_manager_set_rfid_poll_enabled(false);
     s_calib_running = true;
 
     for (int i = 0; i < params_pump_count; i++)

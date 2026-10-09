@@ -194,7 +194,16 @@ sshfs ricardo@192.168.1.2:/ /home/vvicier/sdk/pi-sysroot \
   -o ro,reconnect,follow_symlinks,idmap=user,uid=$(id -u),gid=$(id -g)
 ```
 
-Puis configurer et compiler:
+Puis configurer et compiler avec le preset `rpi` (defini dans
+`ihm/ui/CMakePresets.json`, il contient toutes les options ci-dessous):
+
+```bash
+cd ihm/ui
+cmake --preset rpi
+cmake --build --preset rpi
+```
+
+Equivalent sans preset:
 
 ```bash
 cd ihm/ui

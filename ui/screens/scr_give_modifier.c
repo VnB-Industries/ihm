@@ -17,6 +17,7 @@ static void on_target_clicked(lv_event_t *e)
 
     game_apply_modifier(giver_id, target_id, mod);
     game_set_pending_modifier(MODIFIER_NONE);
+    game_set_modifier_announce();
 
     screen_manager_load(SCREEN_WHEEL);
 }

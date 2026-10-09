@@ -19,7 +19,6 @@ static lv_obj_t    *s_bonus_btn;
 static lv_timer_t  *s_cooldown_timer = NULL;
 #if LV_USE_LOTTIE
 static lv_obj_t    *s_confetti = NULL;
-static uint32_t     s_confetti_buf[700 * 700];
 static lv_timer_t  *s_confetti_timer = NULL;
 #endif
 
@@ -31,6 +30,10 @@ static uint8_t        s_seg_count = 0;
  * and this timer watches the job until it finishes.  Nothing here blocks the
  * LVGL loop, which a stalled link used to do for seconds at a time. */
 static lv_timer_t *s_job_timer = NULL;
+/* Who spun.  The active user can change while the pour runs (Retour, another
+ * profile picked), and the credit must still go to the player who spun. */
+static int   s_pending_user_id = -1;
+static bool  s_spin_recorded = false;
 static int   s_pending_wheel_cl = 0;
 static bool  s_wheel_pump[GAME_DB_MAX_PUMPS];   /* pumps fed by the wheel value */
 static int   s_pending_pump_count = 0;
@@ -54,7 +57,8 @@ static void cooldown_timer_cb(lv_timer_t *t)
     if (remaining <= 0) {
         lv_label_set_text(s_cooldown_label, "");
         lv_obj_add_flag(s_cooldown_label, LV_OBJ_FLAG_HIDDEN);
-        set_spin_btn_enabled(true);
+        /* Never while a pour is still in flight, whoever started it. */
+        set_spin_btn_enabled(s_job_timer == NULL);
         lv_timer_delete(s_cooldown_timer);
         s_cooldown_timer = NULL;
     } else {
@@ -78,7 +82,8 @@ static void update_cooldown_state(void)
 
     if (remaining <= 0) {
         lv_obj_add_flag(s_cooldown_label, LV_OBJ_FLAG_HIDDEN);
-        set_spin_btn_enabled(true);
+        /* Never while a pour is still in flight, whoever started it. */
+        set_spin_btn_enabled(s_job_timer == NULL);
         if (s_cooldown_timer) {
             lv_timer_delete(s_cooldown_timer);
             s_cooldown_timer = NULL;
@@ -112,7 +117,8 @@ static void confetti_preload(lv_obj_t *screen)
     const char *src = asset_path("images/Confetti.json");
     if (src == NULL || s_confetti != NULL) return;
     s_confetti = lv_lottie_create(screen);
-    lv_lottie_set_buffer(s_confetti, 700, 700, s_confetti_buf);
+    lv_lottie_set_buffer(s_confetti, ASSET_CONFETTI_PX, ASSET_CONFETTI_PX,
+                         asset_confetti_buf);
     lv_lottie_set_src_file(s_confetti, src);
     lv_obj_align(s_confetti, LV_ALIGN_CENTER, -170, 0);
     lv_obj_add_flag(s_confetti, LV_OBJ_FLAG_HIDDEN);
@@ -189,6 +195,16 @@ static int credited_cl_from_job(const serial_job_t *job)
     return (int)(measured + 0.5f);
 }
 
+/* Arm the spin's cooldown, once, when the controller shows the pour actually
+ * started.  A pour refused before starting (no glass, link down) costs the
+ * player nothing. */
+static void record_spin_once(void)
+{
+    if (s_spin_recorded) return;
+    s_spin_recorded = true;
+    game_on_spin_started(s_pending_user_id);
+}
+
 static void stop_job_timer(void)
 {
     if (s_job_timer) {
@@ -212,6 +228,8 @@ static const char *dispense_error_text(const char *code)
         return LV_SYMBOL_WARNING " Controleur redemarre, reessaye";
     if (strncmp(code, "TIMEOUT", 7) == 0 || strncmp(code, "SILENCE", 7) == 0)
         return LV_SYMBOL_WARNING " Pas de reponse du controleur";
+    if (strncmp(code, "NO_FLOW", 7) == 0)
+        return LV_SYMBOL_WARNING " Pompe 1 sans debit, bouteille vide ?";
 
     return LV_SYMBOL_WARNING " Distribution refusee";
 }
@@ -232,6 +250,8 @@ static void job_timer_cb(lv_timer_t *t)
             return;
 
         case SERIAL_JOB_RUNNING: {
+            record_spin_once();
+
             char buf[96];
             int off = 0;
             for (int i = 0; i < s_pending_pump_count && off < (int)sizeof(buf); i++) {
@@ -258,10 +278,16 @@ static void job_timer_cb(lv_timer_t *t)
             serial_comm_job_clear();
             stop_job_timer();
 
-            bool bonus_triggered =
-                game_on_dispense_complete(game_get_active_user(), credited);
+            /* A pour quick enough to finish between two ticks never showed
+             * RUNNING here. */
+            record_spin_once();
 
-            if (bonus_triggered) {
+            bool bonus_triggered =
+                game_on_dispense_complete(s_pending_user_id, credited);
+
+            /* The bonus button belongs to whoever spun; if someone else has
+             * taken the wheel screen since, it is not theirs to press. */
+            if (bonus_triggered && s_pending_user_id == game_get_active_user()) {
                 lv_obj_clear_flag(s_bonus_btn, LV_OBJ_FLAG_HIDDEN);
                 /* Cooldown still applies after the bonus wheel; it is
                  * re-checked when SCREEN_WHEEL is entered again. */
@@ -287,11 +313,14 @@ static void job_timer_cb(lv_timer_t *t)
 
             lv_label_set_text(s_result_label, dispense_error_text(code));
 
-            if (partial && credited > 0)
-                game_on_dispense_complete(game_get_active_user(), credited);
+            /* A pour that started and was then cut short used up the turn; one
+             * refused before starting (no glass, link down) did not. */
+            if (partial)
+                record_spin_once();
 
-            /* The spin itself already happened, so the cooldown it armed
-             * stands whether or not the pour completed. */
+            if (partial && credited > 0)
+                game_on_dispense_complete(s_pending_user_id, credited);
+
             update_cooldown_state();
             return;
         }
@@ -362,6 +391,22 @@ static void on_wheel_result(lv_obj_t *wf, uint16_t seg_index,
             volumes[idx0] = cl;
         }
         used = pump_count;
+
+        /* Keep the glass from overflowing.  The wheel pumps pour what the
+         * wheel decided, as in the classic mode; the other ingredients are
+         * scaled down to fit the room that is left. */
+        int wheel_total = 0, other_total = 0;
+        for (int i = 0; i < used; i++) {
+            if (wheel_pump[i]) wheel_total += volumes[i];
+            else               other_total += volumes[i];
+        }
+        if (wheel_total + other_total > glass_cl && other_total > 0) {
+            int room = glass_cl - wheel_total;
+            if (room < 0) room = 0;
+            for (int i = 0; i < used; i++)
+                if (!wheel_pump[i])
+                    volumes[i] = volumes[i] * room / other_total;
+        }
     }
 
     fprintf(stderr, "[gaming] wheel_cl=%d glass_cl=%d pump_count=%d used=%d volumes=[",
@@ -380,21 +425,25 @@ static void on_wheel_result(lv_obj_t *wf, uint16_t seg_index,
         return;
     }
 
-    /* Stamp the spin and arm its cooldown before the pour: the user has had
-     * their turn whether or not the controller cooperates. */
-    game_on_spin_started(game_get_active_user());
-
-    s_pending_wheel_cl   = wheel_cl;
-    s_pending_pump_count = used;
-    memcpy(s_wheel_pump, wheel_pump, sizeof(s_wheel_pump));
-
     if (!serial_comm_begin_dispense(volumes, used)) {
         lv_label_set_text(s_result_label,
                           dispense_error_text(serial_comm_last_error()));
-        serial_comm_job_clear();
+        /* Refused because another job is running (a pour still in flight,
+         * a purge): that job is not ours to discard. */
+        if (!serial_comm_job_active())
+            serial_comm_job_clear();
         update_cooldown_state();
         return;
     }
+
+    /* Only once the controller has the command: overwriting these earlier
+     * would corrupt the credit of a pour still in flight.  The cooldown is
+     * armed by the job timer once the pour actually starts. */
+    s_pending_user_id    = game_get_active_user();
+    s_spin_recorded      = false;
+    s_pending_wheel_cl   = wheel_cl;
+    s_pending_pump_count = used;
+    memcpy(s_wheel_pump, wheel_pump, sizeof(s_wheel_pump));
 
     lv_label_set_text(s_result_label, "Distribution en cours...");
 
@@ -552,8 +601,14 @@ void scr_gaming_refresh(void)
     game_compute_wheel_segments(&u, s_segments, &s_seg_count);
     push_segments_to_wheel();
 
-    /* Show confirmation if a modifier was just applied by this user */
-    if (u.given_modifier != (int)MODIFIER_NONE && u.given_to_id >= 0) {
+    /* Show confirmation if a modifier was just applied by this user.  The
+     * flag, not the stored given_* fields, says "just": those persist. */
+    bool announce = game_take_modifier_announce();
+    if (s_job_timer) {
+        /* Back on this screen while an earlier pour is still running. */
+        lv_label_set_text(s_result_label, "Distribution en cours...");
+    } else if (announce && u.given_modifier != (int)MODIFIER_NONE
+               && u.given_to_id >= 0) {
         user_record_t tgt;
         const char *tname = "?";
         if (db_get_user(u.given_to_id, &tgt) == 0) tname = tgt.name;
@@ -572,6 +627,11 @@ void scr_gaming_refresh(void)
         lv_label_set_text(s_result_label, "Appuyez sur Tourner !");
     }
     lv_obj_add_flag(s_bonus_btn, LV_OBJ_FLAG_HIDDEN);
+
+#if LV_USE_LOTTIE
+    /* The confetti buffer is shared with the bonus wheel screen. */
+    if (s_confetti) lv_obj_add_flag(s_confetti, LV_OBJ_FLAG_HIDDEN);
+#endif
 
     /* Kill any leftover cooldown timer from a previous session */
     if (s_cooldown_timer) {

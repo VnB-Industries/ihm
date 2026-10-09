@@ -184,7 +184,10 @@ static void on_purge_start_clicked(lv_event_t *e)
 
     if (!serial_comm_begin_purge(pump_arg, k_purge_duration_ms)) {
         purge_set_status(LV_SYMBOL_WARNING " Erreur serie", 0xE94560);
-        serial_comm_job_clear();
+        /* Refused because another job (a pour, a calibration) is running:
+         * that job is not ours to discard. */
+        if (!serial_comm_job_active())
+            serial_comm_job_clear();
         return;
     }
 

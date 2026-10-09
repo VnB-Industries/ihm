@@ -15,7 +15,6 @@ static lv_obj_t    *s_spin_btn;
 static lv_obj_t    *s_continue_btn;
 #if LV_USE_LOTTIE
 static lv_obj_t    *s_confetti = NULL;
-static uint32_t     s_confetti_buf[700 * 700];
 static lv_timer_t  *s_confetti_timer = NULL;
 #endif
 
@@ -54,7 +53,8 @@ static void confetti_preload(lv_obj_t *screen)
     const char *src = asset_path("images/Confetti.json");
     if (src == NULL || s_confetti != NULL) return;
     s_confetti = lv_lottie_create(screen);
-    lv_lottie_set_buffer(s_confetti, 700, 700, s_confetti_buf);
+    lv_lottie_set_buffer(s_confetti, ASSET_CONFETTI_PX, ASSET_CONFETTI_PX,
+                         asset_confetti_buf);
     lv_lottie_set_src_file(s_confetti, src);
     lv_obj_align(s_confetti, LV_ALIGN_CENTER, -170, 0);
     lv_obj_add_flag(s_confetti, LV_OBJ_FLAG_HIDDEN);

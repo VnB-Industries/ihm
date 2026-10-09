@@ -1,0 +1,28 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 21, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "rpi",
+      "displayName": "Raspberry Pi 3 (AArch64, fbdev, 1024x600)",
+      "description": "Cross build for the cabinet. Needs the Pi sysroot mounted at ~/sdk/pi-sysroot (see README).",
+      "binaryDir": "${sourceDir}/build-rpi-mount",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/raspberrypi3-linux-aarch64.cmake",
+      "cacheVariables": {
+        "CMAKE_SYSROOT": "$env{HOME}/sdk/pi-sysroot",
+        "IHM_USE_LINUX_FBDEV": "ON",
+        "IHM_USE_LINUX_DRM": "OFF",
+        "IHM_SCREEN_WIDTH": "1024",
+        "IHM_SCREEN_HEIGHT": "600",
+        "IHM_EVDEV_DEVICE": "/dev/input/event2"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "rpi",
+      "configurePreset": "rpi",
+      "jobs": 14
+    }
+  ]
+}

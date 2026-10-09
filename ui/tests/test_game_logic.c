@@ -505,6 +505,16 @@ static void test_legacy_timeout_migrates_to_blocked_until(void)
     CHECK(game_spin_remaining_seconds(&idle) <= 0, "idle user became blocked");
 }
 
+/* The wheel screen announces a handed-out modifier once, not on every visit. */
+static void test_modifier_announce_is_one_shot(void)
+{
+    CHECK(!game_take_modifier_announce(), "announce set before anything happened");
+
+    game_set_modifier_announce();
+    CHECK(game_take_modifier_announce(), "announce not reported after being set");
+    CHECK(!game_take_modifier_announce(), "announce reported twice");
+}
+
 int main(void)
 {
     struct { const char *name; void (*fn)(void); } tests[] = {
@@ -528,6 +538,7 @@ int main(void)
         {"bonus_segments_all_zero_fallback",  test_bonus_segments_all_zero_fallback},
         {"bonus_segments_cap",                test_bonus_segments_cap},
         {"legacy_timeout_migrates",           test_legacy_timeout_migrates_to_blocked_until},
+        {"modifier_announce_is_one_shot",     test_modifier_announce_is_one_shot},
     };
 
     int n = (int)(sizeof(tests) / sizeof(tests[0]));

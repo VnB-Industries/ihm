@@ -81,7 +81,8 @@ int64_t game_spin_remaining_seconds(const user_record_t *u);
 /**
  * Record that @p user_id has just spun the main wheel: stamps
  * last_spin_epoch and arms the configured per-spin cooldown.
- * Call when the wheel stops, before the pour is requested.
+ * Call once the controller shows the pour actually started, so a pour it
+ * refused (no glass, link down) does not cost the player their turn.
  */
 void game_on_spin_started(int user_id);
 
@@ -114,6 +115,12 @@ void            game_set_active_user(int user_id);
 
 modifier_type_t game_get_pending_modifier(void);
 void            game_set_pending_modifier(modifier_type_t m);
+
+/* Set when a modifier has just been handed out, so the wheel screen announces
+ * it once instead of on every later visit.  The take call returns the flag
+ * and clears it. */
+void            game_set_modifier_announce(void);
+bool            game_take_modifier_announce(void);
 
 int             game_get_selected_glass_cl(void);
 void            game_set_selected_glass_cl(int glass_cl);

@@ -13,6 +13,8 @@
 static char s_pool[ASSET_POOL_SLOTS][ASSET_PATH_MAX];
 static unsigned s_pool_next = 0;
 
+uint32_t asset_confetti_buf[ASSET_CONFETTI_PX * ASSET_CONFETTI_PX];
+
 static char *pool_take(void)
 {
     char *slot = s_pool[s_pool_next];

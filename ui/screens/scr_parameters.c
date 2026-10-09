@@ -319,8 +319,6 @@ void scr_parameters_leave(void)
     params_calib_leave();
     params_users_leave();
 
-    screen_manager_set_rfid_poll_enabled(true);
-
     if (params_kb)
         lv_obj_add_flag(params_kb, LV_OBJ_FLAG_HIDDEN);
 }
