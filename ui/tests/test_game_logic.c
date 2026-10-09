@@ -515,6 +515,26 @@ static void test_modifier_announce_is_one_shot(void)
     CHECK(!game_take_modifier_announce(), "announce reported twice");
 }
 
+/* Profile tiles show a medal for the top 3 by cL; ties share a place and
+ * nobody gets one for 0 cL. */
+static void test_cl_rank(void)
+{
+    user_record_t u[5];
+    memset(u, 0, sizeof(u));
+    u[0].total_cl = 10;
+    u[1].total_cl = 30;
+    u[2].total_cl = 20;
+    u[3].total_cl = 20;
+    u[4].total_cl = 0;
+
+    CHECK(game_cl_rank(u, 5, 1) == 1, "top player not 1st");
+    CHECK(game_cl_rank(u, 5, 2) == 2, "tied player not 2nd");
+    CHECK(game_cl_rank(u, 5, 3) == 2, "tied player not 2nd");
+    CHECK(game_cl_rank(u, 5, 0) == 4, "player behind a tie not 4th");
+    CHECK(game_cl_rank(u, 5, 4) == 0, "0 cL player got a place");
+    CHECK(game_cl_rank(u, 5, 5) == 0, "out-of-range index got a place");
+}
+
 int main(void)
 {
     struct { const char *name; void (*fn)(void); } tests[] = {
@@ -539,6 +559,7 @@ int main(void)
         {"bonus_segments_cap",                test_bonus_segments_cap},
         {"legacy_timeout_migrates",           test_legacy_timeout_migrates_to_blocked_until},
         {"modifier_announce_is_one_shot",     test_modifier_announce_is_one_shot},
+        {"cl_rank",                           test_cl_rank},
     };
 
     int n = (int)(sizeof(tests) / sizeof(tests[0]));

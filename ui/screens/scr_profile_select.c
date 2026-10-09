@@ -221,6 +221,33 @@ static void on_kb_event(lv_event_t *e)
     }
 }
 
+/* Gold, silver or bronze disc with the place number, top-left of a tile. */
+static void add_medal(lv_obj_t *tile, int rank)
+{
+    static const uint32_t k_medal_rgb[3] = { 0xF5C518, 0xC0C0C0, 0xCD7F32 };
+    if (rank < 1 || rank > 3) return;
+    lv_color_t color = lv_color_hex(k_medal_rgb[rank - 1]);
+
+    lv_obj_set_style_border_color(tile, color, LV_PART_MAIN);
+    lv_obj_set_style_border_width(tile, 2, LV_PART_MAIN);
+
+    lv_obj_t *medal = lv_obj_create(tile);
+    lv_obj_set_size(medal, 26, 26);
+    lv_obj_align(medal, LV_ALIGN_TOP_LEFT, -2, -2);
+    lv_obj_set_style_radius(medal, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(medal, color, LV_PART_MAIN);
+    lv_obj_set_style_border_color(medal, lv_color_hex(0x1A1A2E), LV_PART_MAIN);
+    lv_obj_set_style_border_width(medal, 2, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(medal, 0, LV_PART_MAIN);
+    /* Not clickable, so a touch on the medal still selects the player. */
+    lv_obj_clear_flag(medal, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *num = lv_label_create(medal);
+    lv_label_set_text_fmt(num, "%d", rank);
+    lv_obj_set_style_text_color(num, lv_color_hex(0x1A1A2E), LV_PART_MAIN);
+    lv_obj_center(num);
+}
+
 /* ── public API ─────────────────────────────────────────────────────────── */
 
 void scr_profile_select_init(void)
@@ -439,6 +466,8 @@ void scr_profile_select_refresh(void)
         lv_label_set_text(sub, info);
         lv_obj_set_style_text_color(sub, lv_color_hex(0x888888), LV_PART_MAIN);
         lv_obj_align(sub, LV_ALIGN_BOTTOM_MID, 0, -4);
+
+        add_medal(btn, game_cl_rank(users, count, i));
     }
 
     lv_obj_t *add_box = lv_btn_create(s_list_cont);

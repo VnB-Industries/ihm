@@ -108,6 +108,13 @@ modifier_type_t game_on_bonus_spin(int user_id, uint16_t seg_index,
  */
 void game_apply_modifier(int giver_id, int target_id, modifier_type_t type);
 
+/**
+ * Leaderboard place of @p users[idx] by total_cl: 1 + the number of users with
+ * strictly more cL, so tied players share a place.  A player with 0 cL has no
+ * place (returns 0): before anyone has poured, nobody is on the podium.
+ */
+int game_cl_rank(const user_record_t *users, int count, int idx);
+
 /* ── session state ──────────────────────────────────────────────────────── */
 
 int             game_get_active_user(void);

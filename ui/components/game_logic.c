@@ -318,3 +318,14 @@ void game_apply_modifier(int giver_id, int target_id, modifier_type_t type)
     db_update_user(&giver);
     db_update_user(&target);
 }
+
+int game_cl_rank(const user_record_t *users, int count, int idx)
+{
+    if (idx < 0 || idx >= count || users[idx].total_cl <= 0) return 0;
+
+    int rank = 1;
+    for (int i = 0; i < count; i++) {
+        if (users[i].total_cl > users[idx].total_cl) rank++;
+    }
+    return rank;
+}
